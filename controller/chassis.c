@@ -970,8 +970,9 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     chassis_private_update(chassis_pvt_rec, chassis_rec, chassis_id);
     *chassis_private = chassis_pvt_rec;
 
+    /* Only return committed Chassis record. */
     ovs_chassis_cfg_destroy(&ovs_cfg);
-    return chassis_rec;
+    return existed ? chassis_rec : NULL;
 exit:
     ovs_chassis_cfg_destroy(&ovs_cfg);
     return NULL;
