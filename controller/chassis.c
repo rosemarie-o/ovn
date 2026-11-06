@@ -898,10 +898,6 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
     *chassis_private = NULL;
 
-    if (!ovnsb_idl_txn) {
-        return NULL;
-    }
-
     /* Get the chassis config from the ovs table. */
     const struct ovsrec_open_vswitch *cfg =
         ovsrec_open_vswitch_table_first(ovs_table);
@@ -925,6 +921,7 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
     /* If no encaps are configured, delete the Chassis record. */
     if (!parse_status) {
+        VLOG_INFO("Parsing failed :(");
         if (chassis_rec) {
             sbrec_chassis_delete(chassis_rec);
         }
@@ -935,14 +932,19 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     }
 
     /* Insert a new record if needed. */
+    if (!ovnsb_idl_txn) {
+        VLOG_INFO("No ovnsb_idl_txn");
+        goto no_ovnsb_idl_txn;
+    }
     if (!chassis_rec) {
         chassis_rec = sbrec_chassis_insert(ovnsb_idl_txn);
     }
-    if (!chassis_rec) {
-        return NULL;
-    }
     if (!chassis_pvt_rec) {
         chassis_pvt_rec = sbrec_chassis_private_insert(ovnsb_idl_txn);
+    }
+    if (!chassis_rec) {
+        VLOG_INFO("No chassis_rec created after inserting!");
+        goto exit;
     }
 
     /* If we found (or created) a record, update it with the correct config
@@ -955,8 +957,11 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
     /* Delete the chassis if another chassis already has the same encap. */
     if (update_status == CHASSIS_NEED_DELETE) {
+        VLOG_INFO("CHASSIS_NEED_DELETE");
         sbrec_chassis_delete(chassis_rec);
-        sbrec_chassis_private_delete(chassis_pvt_rec);
+        if (chassis_pvt_rec) {
+            sbrec_chassis_private_delete(chassis_pvt_rec);
+        }
         goto exit;
     }
 
@@ -967,8 +972,11 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
                                   chassis_id);
     }
 
-    chassis_private_update(chassis_pvt_rec, chassis_rec, chassis_id);
-    *chassis_private = chassis_pvt_rec;
+no_ovnsb_idl_txn:
+    if (chassis_pvt_rec) {
+        chassis_private_update(chassis_pvt_rec, chassis_rec, chassis_id);
+        *chassis_private = chassis_pvt_rec;
+    }
 
     /* Only return committed Chassis record. */
     ovs_chassis_cfg_destroy(&ovs_cfg);
