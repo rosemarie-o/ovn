@@ -919,6 +919,11 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
                                        chassis_id);
     bool existed = chassis_rec != NULL;
 
+    if (!ovnsb_idl_txn) {
+        VLOG_INFO("No ovnsb_idl_txn");
+        goto no_ovnsb_idl_txn;
+    }
+
     /* If no encaps are configured, delete the Chassis record. */
     if (!parse_status) {
         VLOG_INFO("Parsing failed :(");
@@ -932,10 +937,6 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     }
 
     /* Insert a new record if needed. */
-    if (!ovnsb_idl_txn) {
-        VLOG_INFO("No ovnsb_idl_txn");
-        goto no_ovnsb_idl_txn;
-    }
     if (!chassis_rec) {
         chassis_rec = sbrec_chassis_insert(ovnsb_idl_txn);
     }
