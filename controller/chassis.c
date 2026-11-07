@@ -920,13 +920,11 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     bool existed = chassis_rec != NULL;
 
     if (!ovnsb_idl_txn) {
-        VLOG_INFO("No ovnsb_idl_txn");
         goto no_ovnsb_idl_txn;
     }
 
     /* If no encaps are configured, delete the Chassis record. */
     if (!parse_status) {
-        VLOG_INFO("Parsing failed :(");
         if (chassis_rec) {
             sbrec_chassis_delete(chassis_rec);
         }
@@ -944,7 +942,6 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
         chassis_pvt_rec = sbrec_chassis_private_insert(ovnsb_idl_txn);
     }
     if (!chassis_rec) {
-        VLOG_INFO("No chassis_rec created after inserting!");
         goto exit;
     }
 
@@ -958,7 +955,6 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
     /* Delete the chassis if another chassis already has the same encap. */
     if (update_status == CHASSIS_NEED_DELETE) {
-        VLOG_INFO("CHASSIS_NEED_DELETE");
         sbrec_chassis_delete(chassis_rec);
         if (chassis_pvt_rec) {
             sbrec_chassis_private_delete(chassis_pvt_rec);
