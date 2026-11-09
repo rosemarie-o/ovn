@@ -1031,6 +1031,8 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     ovsdb_idl_add_column(ovs_idl, &ovsrec_interface_col_link_state);
     ovsdb_idl_add_table(ovs_idl, &ovsrec_table_ct_zone);
     ovsdb_idl_add_column(ovs_idl, &ovsrec_ct_zone_col_limit);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_open_vswitch_col_next_cfg);
+    ovsdb_idl_add_column(ovs_idl, &ovsrec_open_vswitch_col_cur_cfg);
 
     chassis_register_ovs_idl(ovs_idl);
     encaps_register_ovs_idl(ovs_idl);
@@ -8628,6 +8630,11 @@ main(int argc, char *argv[])
 
         /* Enable ACL matching for double tagged traffic. */
         if (ovs_idl_txn && cfg) {
+            if (cfg->cur_cfg == cfg->next_cfg) {
+                ovsdb_idl_txn_increment(ovs_idl_txn, &cfg->header_,
+                                        &ovsrec_open_vswitch_col_next_cfg, false);
+            }
+
             int vlan_limit = smap_get_int(
                 &cfg->other_config, "vlan-limit", -1);
             if (vlan_limit != 0) {
@@ -8657,6 +8664,8 @@ main(int argc, char *argv[])
         if (ovs_idl_txn) {
             store_chassis_index_if_needed(ovs_table);
         }
+
+        bool patch_ports_synced = true;
 
         if (ovsdb_idl_has_ever_connected(ovnsb_idl_loop.idl) &&
             northd_version_match && cfg) {
@@ -8826,8 +8835,6 @@ main(int argc, char *argv[])
                         }
                     }
 
-                    bool patch_ports_synced = true;
-
                     runtime_data = engine_get_data(&en_runtime_data);
                     if (runtime_data) {
                         stopwatch_start(PATCH_RUN_STOPWATCH_NAME, time_msec());
@@ -8968,7 +8975,8 @@ main(int argc, char *argv[])
                     /* Wait for patch ports to be installed and synced before
                      * incrementing nb_cfg so that --wait=hv properly waits
                      * for patch ports. */
-                    if (patch_ports_synced) {
+                    if (cfg && cfg->cur_cfg >= cfg->next_cfg
+                        && patch_ports_synced) {
                         /* Snapshot (nb_cfg, sb_ts) atomically from SB_Global
                          * and pair them through the barrier ack so the
                          * eventual completion can be attributed to the
