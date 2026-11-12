@@ -48870,3 +48870,92 @@ AT_CHECK([ovs-ofctl dump-flows br-int table=OFTABLE_PHY_TO_LOG \
 OVN_CLEANUP([hv1])
 AT_CLEANUP
 ])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-controller increments OVS next_cfg handshake])
+
+# Bare-bones detector: does ovn-controller's OVS DB transaction actually
+# bump the Open_vSwitch:next_cfg COLUMN, and does ovs-vswitchd confirm by
+# advancing cur_cfg?  Verifies the DB-side handshake end to end.
+#
+# NOTE: never use `ovs-vsctl --wait=hv` in this test -- it bumps next_cfg
+# itself and would corrupt the counters we assert on.
+
+ovn_start
+
+check ovn-nbctl ls-add ls1
+net_add n
+
+sim_add hv1
+as hv1
+check ovs-vsctl add-br br-phys
+check ovs-vsctl set open . external-ids:ovn-bridge-mappings=phys:br-phys
+ovn_attach n br-phys 192.168.0.1
+
+check ovn-nbctl lsp-add ls1 lsp1
+check as hv1 ovs-vsctl --no-wait -- add-port br-int vif1 \
+                    -- set Interface vif1 external_ids:iface-id=lsp1 \
+                    -- set Interface vif1 type=internal
+wait_for_ports_up
+
+# --- Phase 0: quiesce (everything awake — convergence achievable) ----
+OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)" = \
+                    "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)"])
+# hv1 has echoed every generation SB knows about.
+OVS_WAIT_UNTIL([test "$(fetch_column Chassis_Private nb_cfg name=hv1)" = \
+                    "$(fetch_column SB_Global nb_cfg)"])
+next0=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+cur0=$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)
+ch_nb0=$(fetch_column Chassis_Private nb_cfg name=hv1)
+sb_nb0=$(fetch_column SB_Global nb_cfg)
+
+# --- Phase 1: freeze ---------------------------------------------------
+sleep_ovs hv1
+
+# --- Phase 2: trigger (this --wait=sb ALSO bumps the NB generation) ----
+check ovn-nbctl --wait=sb lsp-add-localnet-port ls1 ln1 phys
+OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)" \
+                    -gt $next0])
+AT_CHECK([test "$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)" = "$cur0"])
+
+# --- Phase 2.5: negative control — pure assertion, NO wait -------------
+# --wait=sb returned, so the new generation is in SB for sure.
+AT_CHECK([test "$(fetch_column SB_Global nb_cfg)" -gt $sb_nb0])
+# hv1 must NOT echo it: the gate is closed (cur < next) and no barrier
+# can be replied to.  Whether or not the controller has seen the new
+# generation yet, it cannot stamp it — so no polling needed, and none
+# is possible: this can never converge while frozen.
+AT_CHECK([test "$(fetch_column Chassis_Private nb_cfg name=hv1)" = "$ch_nb0"])
+
+# Bump the NB generation while the freeze holds.  --wait=sb only waits
+# for northd, which is unaffected by hv1's frozen ovs-vswitchd.
+check ovn-nbctl --wait=sb sync
+
+# --- Phase 3: release and confirm -------------------------------------
+wake_up_ovs hv1
+OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)" = "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)"])
+AT_CHECK([test "$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)" -gt $cur0])
+
+# --- Phase 4: patch port installed --------------------------------------
+# ofport is assigned by ovs-vswitchd during reconfiguration; its OVSDB
+# write may land slightly after cur_cfg, so keep this a bounded poll.
+check ovs-vsctl wait-until Interface patch-br-int-to-ln1 "ofport>0"
+ofport=$(ovs-vsctl --bare --columns ofport find Interface name=patch-br-int-to-ln1)
+
+# The flow referencing that ofport is installed by ovn-controller after
+# it SEES the ofport (engine recompute -> ofctrl_put), so poll for it too.
+OVS_WAIT_UNTIL([ovs-ofctl dump-flows br-int table=OFTABLE_PHY_TO_LOG \
+    | grep -q in_port=$ofport])
+
+# --- Phase 5: conclusion: the generation is now reported ----------------
+# With the gate open (cur == next) and the barrier acked, hv1 must
+# report the new generation.
+echo "right before chassis priv check"
+OVS_WAIT_UNTIL([test "$(fetch_column Chassis_Private nb_cfg name=hv1)" -gt $ch_nb0])
+
+# Capstone: the user-visible behavior, end to end, must now converge.
+check ovn-nbctl --wait=hv sync
+
+OVN_CLEANUP([hv1])
+AT_CLEANUP
+])
