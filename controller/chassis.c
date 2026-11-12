@@ -882,6 +882,19 @@ chassis_private_update(const struct sbrec_chassis_private *chassis_pvt,
     }
 }
 
+/* Delete the Chassis and Chassis_Private records, if they exist. */
+static void
+chassis_delete(const struct sbrec_chassis *chassis_rec,
+               const struct sbrec_chassis_private *chassis_pvt_rec)
+{
+    if (chassis_rec) {
+        sbrec_chassis_delete(chassis_rec);
+    }
+    if (chassis_pvt_rec) {
+        sbrec_chassis_private_delete(chassis_pvt_rec);
+    }
+}
+
 /* Returns this chassis's Chassis record, if it is available. */
 const struct sbrec_chassis *
 chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
@@ -920,20 +933,21 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     bool existed = chassis_rec != NULL;
 
     if (!ovnsb_idl_txn) {
-        goto no_ovnsb_idl_txn;
+        ovs_chassis_cfg_destroy(&ovs_cfg);
+        /* If there's no txn, still return the Chassis record if it exists. */
+        return chassis_rec;
     }
 
     /* If no encaps are configured, delete the Chassis record. */
     if (!parse_status) {
-        goto delete_chassis;
+        chassis_delete(chassis_rec, chassis_pvt_rec);
+        ovs_chassis_cfg_destroy(&ovs_cfg);
+        return NULL;
     }
 
     /* Insert a new record if needed. */
     if (!chassis_rec) {
         chassis_rec = sbrec_chassis_insert(ovnsb_idl_txn);
-        if (!chassis_rec) {
-            goto exit;
-        }
     }
     if (!chassis_pvt_rec) {
         chassis_pvt_rec = sbrec_chassis_private_insert(ovnsb_idl_txn);
@@ -949,7 +963,9 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
     /* Delete the chassis if another chassis already has the same encap. */
     if (update_status == CHASSIS_NEED_DELETE) {
-        goto delete_chassis;
+        chassis_delete(chassis_rec, chassis_pvt_rec);
+        ovs_chassis_cfg_destroy(&ovs_cfg);
+        return NULL;
     }
 
     if (!existed || update_status == CHASSIS_UPDATED) {
@@ -958,9 +974,7 @@ chassis_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
                                   !existed ? "registering" : "updating",
                                   chassis_id);
     }
-
-no_ovnsb_idl_txn:
-    if (chassis_rec && chassis_pvt_rec) {
+    if (chassis_pvt_rec) {
         chassis_private_update(chassis_pvt_rec, chassis_rec, chassis_id);
         *chassis_private = chassis_pvt_rec;
     }
@@ -968,18 +982,6 @@ no_ovnsb_idl_txn:
     /* Only return committed Chassis record. */
     ovs_chassis_cfg_destroy(&ovs_cfg);
     return existed ? chassis_rec : NULL;
-
-delete_chassis:
-    if (chassis_rec) {
-        sbrec_chassis_delete(chassis_rec);
-    }
-    if (chassis_pvt_rec) {
-        sbrec_chassis_private_delete(chassis_pvt_rec);
-    }
-
-exit:
-    ovs_chassis_cfg_destroy(&ovs_cfg);
-    return NULL;
 }
 
 bool
