@@ -8630,10 +8630,11 @@ main(int argc, char *argv[])
 
         /* Enable ACL matching for double tagged traffic. */
         if (ovs_idl_txn && cfg) {
-            if (cfg->cur_cfg == cfg->next_cfg) {
-                ovsdb_idl_txn_increment(ovs_idl_txn, &cfg->header_,
-                                        &ovsrec_open_vswitch_col_next_cfg, false);
-            }
+            /* read and verify here
+             * also add a flag for whether to increment, don't increment regardless
+             * because many txns are just setting external ids, ovn-installed, etc */
+            ovsdb_idl_txn_increment(ovs_idl_txn, &cfg->header_,
+                                    &ovsrec_open_vswitch_col_next_cfg, false);
 
             int vlan_limit = smap_get_int(
                 &cfg->other_config, "vlan-limit", -1);
