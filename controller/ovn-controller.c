@@ -8633,7 +8633,7 @@ main(int argc, char *argv[])
          * are also true. How can I do this without creating a bunch of bools?
          * The same applies to inside functions with synced vs installed, but
          * that's easier. But remember to do that. */
-        bool increment_next_cfg = false;
+        bool increment_next_cfg = true;
 
         /* Enable ACL matching for double tagged traffic. */
         if (ovs_idl_txn && cfg) {
@@ -8770,7 +8770,9 @@ main(int argc, char *argv[])
                                is_ha_chassis_member);
 
                     if (encaps_synced) {
-                        increment_next_cfg = true;
+                        increment_next_cfg = true && increment_next_cfg;
+                    } else {
+                        increment_next_cfg = false;
                     }
 
                     ovn_netlink_notifiers_run();
@@ -8829,11 +8831,15 @@ main(int argc, char *argv[])
                         if (ct_zones_data) {
                             stopwatch_start(CT_ZONE_COMMIT_STOPWATCH_NAME,
                                             time_msec());
-                            ct_zones_commit(br_int, br_int_dp, ovs_idl_txn,
+                            bool ct_zones_synced = ct_zones_commit(br_int, br_int_dp, ovs_idl_txn,
                                             &ct_zones_data->ctx);
                             stopwatch_stop(CT_ZONE_COMMIT_STOPWATCH_NAME,
                                            time_msec());
-                            //increment_next_cfg = true;
+                            if (ct_zones_synced) {
+                                increment_next_cfg = true && increment_next_cfg;
+                            } else {
+                                increment_next_cfg = false;
+                            }
                         }
                         if (bfd_chassis_data) {
                             stopwatch_start(
@@ -8847,8 +8853,10 @@ main(int argc, char *argv[])
                             );
                             stopwatch_stop(
                                 BFD_RUN_STOPWATCH_NAME, time_msec());
-                            if (!bfd_synced) {
-                                increment_next_cfg = true;
+                            if (bfd_synced) {
+                                increment_next_cfg = true && increment_next_cfg;
+                            } else {
+                                increment_next_cfg = false;
                             }
                         }
                     }
@@ -8864,7 +8872,9 @@ main(int argc, char *argv[])
                             &runtime_data->local_datapaths);
                         stopwatch_stop(PATCH_RUN_STOPWATCH_NAME, time_msec());
                         if (!patch_ports_synced) {
-                            increment_next_cfg = true;
+                            increment_next_cfg = true && increment_next_cfg;
+                        } else {
+                            increment_next_cfg = false;
                         }
 
 
@@ -8981,12 +8991,16 @@ main(int argc, char *argv[])
                             }
                         }
                         if (ovs_idl_txn) {
-                            update_qos(sbrec_port_binding_by_name, ovs_idl_txn,
+                            bool update_qos_synced = update_qos(sbrec_port_binding_by_name, ovs_idl_txn,
                                        ovsrec_port_by_qos,
                                        ovsrec_qos_table_get(ovs_idl_loop.idl),
                                        &runtime_data->qos_map,
                                        ovs_table, bridge_table);
-                            increment_next_cfg = true;
+                        if (update_qos_synced) {
+                            increment_next_cfg = true && increment_next_cfg;
+                        } else {
+                            increment_next_cfg = false;
+                        }
                         }
                     }
 

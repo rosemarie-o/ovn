@@ -435,7 +435,7 @@ configure_qos(const struct sbrec_port_binding *pb,
     }
 }
 
-void
+bool
 update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
            struct ovsdb_idl_txn *ovs_idl_txn,
            struct ovsdb_idl_index *ovsrec_port_by_qos,
@@ -446,6 +446,10 @@ update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
 {
     /* Remove qos for any ports for which we could not do it before */
     const struct sbrec_port_binding *pb;
+
+    if (shash_is_empty(&_qos_ports)) {
+        return true;
+    }
 
     struct shash_node *node;
     SHASH_FOR_EACH_SAFE (node, &_qos_ports) {
@@ -465,6 +469,7 @@ update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
         free(qos_port);
         shash_delete(&_qos_ports, node);
     }
+    return false;
 }
 
 static const struct ovsrec_queue *

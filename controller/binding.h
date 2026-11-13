@@ -279,7 +279,7 @@ void binding_destroy(void);
 
 void destroy_qos_map(struct hmap *);
 
-void update_qos(struct ovsdb_idl_index * sbrec_port_binding_by_name,
+bool update_qos(struct ovsdb_idl_index * sbrec_port_binding_by_name,
                 struct ovsdb_idl_txn *ovs_idl_txn,
                 struct ovsdb_idl_index *ovsrec_port_by_qos,
                 const struct ovsrec_qos_table *qos_table,
