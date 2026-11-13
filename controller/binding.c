@@ -447,9 +447,7 @@ update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
     /* Remove qos for any ports for which we could not do it before */
     const struct sbrec_port_binding *pb;
 
-    if (shash_is_empty(&_qos_ports)) {
-        return true;
-    }
+    bool qos_synced = true;
 
     struct shash_node *node;
     SHASH_FOR_EACH_SAFE (node, &_qos_ports) {
@@ -460,16 +458,18 @@ update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
             if (pb) {
                 configure_qos(pb, ovs_idl_txn, ovsrec_port_by_qos, qos_table,
                               qos_map, ovs_table, bridge_table);
+                qos_synced = false;
             }
         } else {
             remove_stale_qos_entry(node->name,
                                    ovsrec_port_by_qos,
                                    qos_table, qos_map);
+            qos_synced = false;
         }
         free(qos_port);
         shash_delete(&_qos_ports, node);
     }
-    return false;
+    return qos_synced;
 }
 
 static const struct ovsrec_queue *
