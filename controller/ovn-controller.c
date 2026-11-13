@@ -8766,13 +8766,18 @@ main(int argc, char *argv[])
         pinctrl_update_swconn(br_int_remote.target,
                               br_int_remote.probe_interval);
 
+        int64_t next_cfg = 0;
+        bool increment_next_cfg = false;
+
         /* Enable ACL matching for double tagged traffic. */
         if (ovs_idl_txn && cfg) {
             /* read and verify here
              * also add a flag for whether to increment, don't increment regardless
              * because many txns are just setting external ids, ovn-installed, etc */
-            ovsdb_idl_txn_increment(ovs_idl_txn, &cfg->header_,
-                                    &ovsrec_open_vswitch_col_next_cfg, false);
+            /* The read & verify of read-verify-write. */
+            next_cfg = cfg->next_cfg;
+            ovsrec_open_vswitch_verify_cur_cfg(cfg);
+            /* Move increment to later! */
 
             int vlan_limit = smap_get_int(
                 &cfg->other_config, "vlan-limit", -1);
@@ -8854,6 +8859,7 @@ main(int argc, char *argv[])
                                         ovs_feature_max_select_groups_get());
                 ovn_extend_table_reinit(&lflow_out_data->meter_table,
                                         ovs_feature_max_meters_get());
+                //increment_next_cfg = true;
             }
 
             if (br_int) {
@@ -8889,7 +8895,7 @@ main(int argc, char *argv[])
                                                              chassis->name);
                         sset_destroy(&tmp);
                     }
-                    encaps_run(ovs_idl_txn, ovnsb_idl_txn, br_int,
+                    bool encaps_synced = encaps_run(ovs_idl_txn, ovnsb_idl_txn, br_int,
                                sbrec_chassis_table_get(ovnsb_idl_loop.idl),
                                chassis,
                                sbg,
@@ -8897,6 +8903,10 @@ main(int argc, char *argv[])
                                &transport_zones,
                                bridge_table,
                                is_ha_chassis_member);
+
+                    if (encaps_synced) {
+                        increment_next_cfg = true;
+                    }
 
                     ovn_netlink_notifiers_run();
 
@@ -8958,11 +8968,12 @@ main(int argc, char *argv[])
                                             &ct_zones_data->ctx);
                             stopwatch_stop(CT_ZONE_COMMIT_STOPWATCH_NAME,
                                            time_msec());
+                            //increment_next_cfg = true;
                         }
                         if (bfd_chassis_data) {
                             stopwatch_start(
                                 BFD_RUN_STOPWATCH_NAME, time_msec());
-                            bfd_run(
+                            bool bfd_synced = bfd_run(
                                 ovsrec_interface_table_get(ovs_idl_loop.idl),
                                 br_int, &bfd_chassis_data->bfd_chassis,
                                 chassis, sbrec_sb_global_table_get(
@@ -8971,6 +8982,9 @@ main(int argc, char *argv[])
                             );
                             stopwatch_stop(
                                 BFD_RUN_STOPWATCH_NAME, time_msec());
+                            if (!bfd_synced) {
+                                increment_next_cfg = true;
+                            }
                         }
                     }
 
@@ -8984,6 +8998,10 @@ main(int argc, char *argv[])
                             ovsrec_port_by_name, br_int, chassis,
                             &runtime_data->local_datapaths);
                         stopwatch_stop(PATCH_RUN_STOPWATCH_NAME, time_msec());
+                        if (!patch_ports_synced) {
+                            increment_next_cfg = true;
+                        }
+
 
                         if (vif_plug_provider_has_providers() && ovs_idl_txn) {
                             struct vif_plug_ctx_in vif_plug_ctx_in = {
@@ -9017,6 +9035,7 @@ main(int argc, char *argv[])
                                          &vif_plug_ctx_out);
                             stopwatch_stop(VIF_PLUG_RUN_STOPWATCH_NAME,
                                            time_msec());
+                            //increment_next_cfg = true;
                         }
                         stopwatch_start(PINCTRL_RUN_STOPWATCH_NAME,
                                         time_msec());
@@ -9102,6 +9121,7 @@ main(int argc, char *argv[])
                                        ovsrec_qos_table_get(ovs_idl_loop.idl),
                                        &runtime_data->qos_map,
                                        ovs_table, bridge_table);
+                            increment_next_cfg = true;
                         }
                     }
 
@@ -9111,10 +9131,14 @@ main(int argc, char *argv[])
                                      chassis, mac_cache_data);
                     }
 
+                    if (ovs_idl_txn && cfg && (increment_next_cfg)) {
+                        ovsdb_idl_txn_increment(ovs_idl_txn, &cfg->header_,
+                                    &ovsrec_open_vswitch_col_next_cfg, false);
+                    }
                     /* Wait for patch ports to be installed and synced before
                      * incrementing nb_cfg so that --wait=hv properly waits
                      * for patch ports. */
-                    if (cfg && cfg->cur_cfg >= cfg->next_cfg
+                    if (cfg && cfg->cur_cfg >= next_cfg
                         && patch_ports_synced) {
                         /* Snapshot (nb_cfg, sb_ts) atomically from SB_Global
                          * and pair them through the barrier ack so the

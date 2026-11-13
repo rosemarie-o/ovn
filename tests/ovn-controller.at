@@ -4140,7 +4140,8 @@ OVS_WAIT_UNTIL([
 ])
 
 # Make sure controller logs have correct number of transactions.
-OVS_WAIT_FOR_OUTPUT([grep -c "transact" hv2/ovn-controller.log], [0], [2
+# Account for txns incrementing next_cfg as well.
+OVS_WAIT_FOR_OUTPUT([grep -c "transact" hv2/ovn-controller.log], [0], [3
 ])
 OVS_WAIT_FOR_OUTPUT([grep -c "transact" hv1/ovn-controller.log], [0], [1
 ])
