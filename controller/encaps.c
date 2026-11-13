@@ -734,7 +734,7 @@ create_port_based_tunnels(struct tunnel_ctx *tc,
     }
 }
 
-void
+bool
 encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
            struct ovsdb_idl_txn *ovnsb_idl_txn,
            const struct ovsrec_bridge *br_int,
@@ -747,13 +747,15 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
            bool is_ha_chassis_member)
 {
     if (!ovs_idl_txn || !ovnsb_idl_txn || !br_int) {
-        return;
+        return true;
     }
 
     bool use_flow_based = is_flow_based_tunnels_enabled(ovs_table,
                                                         this_chassis);
     VLOG_DBG("Using %s tunnels for this chassis.",
              use_flow_based ? "flow-based" : "port-based");
+
+    bool encaps_synced = true;
 
     if (!current_br_int_name) {
         /* The controller has just started, we need to look through all
@@ -767,6 +769,7 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
                 continue;
             }
             clear_old_tunnels(br, tunnel_prefix, prefix_len);
+            encaps_synced = false;
         }
 
         free(tunnel_prefix);
@@ -778,6 +781,7 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
             get_bridge(bridge_table, current_br_int_name);
         if (old_br_int) {
             clear_old_tunnels(old_br_int, "", 0);
+            encaps_synced = false;
         }
 
         free(current_br_int_name);
@@ -804,6 +808,16 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
         const struct ovsrec_port *port = br_int->ports[i];
         sset_add(&tc.port_names, port->name);
 
+        for (size_t i = 0; i < port->n_interfaces; i++) {
+            const struct ovsrec_interface *iface = port->interfaces[i];
+
+            /* An ofport of 0 means that it has not been assigned yet and
+             * -1 means that ovs-vswitchd failed to add the interface. */
+            if (!iface->n_ofport || *iface->ofport < 1) {
+                encaps_synced = false;
+            }
+        }
+
         const char *id = smap_get(&port->external_ids, OVN_TUNNEL_ID);
         if (id) {
             struct tunnel_node *tunnel = xzalloc(sizeof *tunnel);
@@ -822,6 +836,7 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
                      * to delete this one. */
                     ovsrec_bridge_update_ports_delvalue(br_int, port);
                     free(tunnel);
+                    encaps_synced = false;
                 }
             }
         }
@@ -839,6 +854,9 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
     }
 
     create_evpn_tunnels(&tc);
+    if  (!shash_is_empty(&tc.tunnel) || !shash_is_empty(&tc.evpn_tunnels)) {
+        encaps_synced = false;
+    }
 
     /* Delete any existing OVN tunnels that were not still around. */
     struct shash_node *node;
@@ -859,6 +877,7 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
     shash_destroy(&tc.tunnel);
     sset_destroy(&tc.port_names);
     shash_destroy(&tc.evpn_tunnels);
+    return encaps_synced;
 }
 
 /* Returns true if the database is all cleaned up, false if more work is

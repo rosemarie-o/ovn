@@ -180,7 +180,9 @@ bfd_calculate_chassis(
     }
 }
 
-void
+/* Returns true if the database already reflects the desired state, and false
+ * if changes need to be made. */
+bool
 bfd_run(const struct ovsrec_interface_table *interface_table,
         const struct ovsrec_bridge *br_int,
         const struct sset *bfd_chassis,
@@ -189,7 +191,7 @@ bfd_run(const struct ovsrec_interface_table *interface_table,
         const struct ovsrec_open_vswitch_table *ovs_table)
 {
     if (!chassis_rec) {
-        return;
+        return true;
     }
 
     /* Identify tunnels ports(connected to remote chassis id) to enable bfd */
@@ -249,9 +251,14 @@ bfd_run(const struct ovsrec_interface_table *interface_table,
         smap_add(&bfd, "check_tnl_key", "true");
     }
 
+    bool bfd_synced = true;
+
     /* Enable or disable bfd */
     const struct ovsrec_interface *iface;
     OVSREC_INTERFACE_TABLE_FOR_EACH (iface, interface_table) {
+        if (!iface->n_ofport || *iface->ofport < 1) {
+            bfd_synced = false;
+        }
         if (sset_contains(&tunnels, iface->name)) {
             if (sset_contains(&bfd_ifaces, iface->name)) {
                 /* We need to enable BFD for this interface. Configure the
@@ -263,6 +270,7 @@ bfd_run(const struct ovsrec_interface_table *interface_table,
                     ovsrec_interface_verify_bfd(iface);
                     ovsrec_interface_set_bfd(iface, &bfd);
                     VLOG_INFO("Enabled BFD on interface %s", iface->name);
+                    bfd_synced = false;
                 }
             } else {
                 /* We need to disable BFD for this interface if it was enabled
@@ -271,6 +279,7 @@ bfd_run(const struct ovsrec_interface_table *interface_table,
                     ovsrec_interface_verify_bfd(iface);
                     ovsrec_interface_set_bfd(iface, NULL);
                     VLOG_INFO("Disabled BFD on interface %s", iface->name);
+                    bfd_synced = false;
                 }
             }
         }
@@ -279,4 +288,5 @@ bfd_run(const struct ovsrec_interface_table *interface_table,
     smap_destroy(&bfd);
     sset_destroy(&tunnels);
     sset_destroy(&bfd_ifaces);
+    return bfd_synced;
 }
