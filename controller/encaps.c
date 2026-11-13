@@ -808,8 +808,8 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
         const struct ovsrec_port *port = br_int->ports[i];
         sset_add(&tc.port_names, port->name);
 
-        for (size_t i = 0; i < port->n_interfaces; i++) {
-            const struct ovsrec_interface *iface = port->interfaces[i];
+        for (size_t j = 0; j < port->n_interfaces; j++) {
+            const struct ovsrec_interface *iface = port->interfaces[j];
 
             /* An ofport of 0 means that it has not been assigned yet and
              * -1 means that ovs-vswitchd failed to add the interface. */

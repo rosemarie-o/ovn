@@ -287,14 +287,14 @@ ct_zones_update(const struct simap *local_lports,
     bitmap_free(unreq_snat_zones_map);
 }
 
-void
+bool
 ct_zones_commit(const struct ovsrec_bridge *br_int,
                 const struct ovsrec_datapath *ovs_dp,
                 struct ovsdb_idl_txn *ovs_idl_txn,
                 struct ct_zone_ctx *ctx)
 {
     if (shash_is_empty(&ctx->pending)) {
-        return;
+        return true;
     }
 
     struct ovsrec_ct_zone **all_zones =
@@ -302,6 +302,8 @@ ct_zones_commit(const struct ovsrec_bridge *br_int,
     for (size_t i = 0; i < ovs_dp->n_ct_zones; i++) {
         all_zones[ovs_dp->key_ct_zones[i]] = ovs_dp->value_ct_zones[i];
     }
+
+    bool ct_zones_synced = true;
 
     struct shash_node *iter;
     SHASH_FOR_EACH (iter, &ctx->pending) {
@@ -336,6 +338,7 @@ ct_zones_commit(const struct ovsrec_bridge *br_int,
         struct ovsrec_ct_zone *ovs_zone = all_zones[ct_zone->zone];
         if ((!ctzpe->add || ct_zone->limit < 0) && ovs_zone) {
             ovsrec_datapath_update_ct_zones_delkey(ovs_dp, ct_zone->zone);
+            ct_zones_synced = false;
         } else if (ctzpe->add && ct_zone->limit >= 0) {
             if (!ovs_zone) {
                 ovs_zone = ovsrec_ct_zone_insert(ovs_idl_txn);
@@ -343,12 +346,14 @@ ct_zones_commit(const struct ovsrec_bridge *br_int,
                                                        ovs_zone);
             }
             ovsrec_ct_zone_set_limit(ovs_zone, &ct_zone->limit, 1);
+            ct_zones_synced = false;
         }
 
         ctzpe->state = CT_ZONE_DB_SENT;
     }
 
     free(all_zones);
+    return ct_zones_synced;
 }
 
 void

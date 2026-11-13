@@ -8629,6 +8629,10 @@ main(int argc, char *argv[])
                               br_int_remote.probe_interval);
 
         int64_t next_cfg = 0;
+        /* Hm. I need this to only be true only when all of the results we grab
+         * are also true. How can I do this without creating a bunch of bools?
+         * The same applies to inside functions with synced vs installed, but
+         * that's easier. But remember to do that. */
         bool increment_next_cfg = false;
 
         /* Enable ACL matching for double tagged traffic. */
@@ -8721,7 +8725,6 @@ main(int argc, char *argv[])
                                         ovs_feature_max_select_groups_get());
                 ovn_extend_table_reinit(&lflow_out_data->meter_table,
                                         ovs_feature_max_meters_get());
-                //increment_next_cfg = true;
             }
 
             if (br_int) {

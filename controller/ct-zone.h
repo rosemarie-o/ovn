@@ -74,7 +74,7 @@ void ct_zones_update(const struct simap *local_lports,
                      const struct ovsrec_open_vswitch_table *ovs_table,
                      const struct hmap *local_datapaths,
                      struct ct_zone_ctx *ctx);
-void ct_zones_commit(const struct ovsrec_bridge *br_int,
+bool ct_zones_commit(const struct ovsrec_bridge *br_int,
                      const struct ovsrec_datapath *ovs_dp,
                      struct ovsdb_idl_txn *ovs_idl_txn,
                      struct ct_zone_ctx *ctx);
