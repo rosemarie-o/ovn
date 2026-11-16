@@ -8652,6 +8652,8 @@ main(int argc, char *argv[])
     int ovnsb_txn_status = 1;
     struct tracked_acl_ids *tracked_acl_ids = NULL;
     struct ovsdb_idl_txn *ovs_idl_txn_inc_next_cfg = NULL;
+    int64_t next_cfg = 0;
+    enum ovsdb_idl_txn_status inc_txn_status;
     while (!exit_args.exiting) {
         ovsrcu_quiesce_end();
 
@@ -8679,6 +8681,16 @@ main(int argc, char *argv[])
         }
 
         engine_init_run();
+
+        /* Check status of txn that only increments next_cfg. */
+        if (ovs_idl_txn_inc_next_cfg) {
+            inc_txn_status = ovsdb_idl_txn_commit(ovs_idl_txn_inc_next_cfg);
+            if (inc_txn_status == TXN_SUCCESS) {
+                next_cfg = ovsdb_idl_txn_get_increment_new_value(ovs_idl_txn_inc_next_cfg);
+                ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
+                ovs_idl_txn_inc_next_cfg = NULL;
+            }
+        }
 
         struct ovsdb_idl_txn *ovs_idl_txn = ovsdb_idl_loop_run(&ovs_idl_loop);
         unsigned int new_ovs_cond_seqno
@@ -8767,7 +8779,6 @@ main(int argc, char *argv[])
         pinctrl_update_swconn(br_int_remote.target,
                               br_int_remote.probe_interval);
 
-        int64_t next_cfg = 0;
         /* Hm. I need this to only be true only when all of the results we grab
          * are also true. How can I do this without creating a bunch of bools?
          * The same applies to inside functions with synced vs installed, but
@@ -9312,16 +9323,23 @@ main(int argc, char *argv[])
 
         int ovs_txn_status = ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop);
 
-        /* Send a txn that only increments next_cfg. */
-        if (increment_next_cfg && cfg) {
+        /* Check status of txn that only increments next_cfg. */
+        if (increment_next_cfg && cfg && !ovs_idl_txn_inc_next_cfg) {
             ovs_idl_txn_inc_next_cfg = ovsdb_idl_txn_create(ovs_idl_loop.idl);
             ovsdb_idl_txn_increment(ovs_idl_txn_inc_next_cfg, &cfg->header_,
                                     &ovsrec_open_vswitch_col_next_cfg, true);
-            enum ovsdb_idl_txn_status inc_txn_status = ovsdb_idl_txn_commit(ovs_idl_txn_inc_next_cfg);
+            inc_txn_status = ovsdb_idl_txn_commit(ovs_idl_txn_inc_next_cfg);
             if (inc_txn_status == TXN_SUCCESS) {
                 next_cfg = ovsdb_idl_txn_get_increment_new_value(ovs_idl_txn_inc_next_cfg);
                 ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
+                ovs_idl_txn_inc_next_cfg = NULL;
+            } else if (inc_txn_status == TXN_INCOMPLETE) {
+                /* Let it be so it can try to commit. */
+            } else {
+                ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
+                ovs_idl_txn_inc_next_cfg = NULL;
             }
+
         }
 
         if (!ovs_txn_status) {
@@ -9453,6 +9471,11 @@ loop_done:
     shash_destroy(&vif_plug_deleted_iface_ids);
     shash_destroy(&vif_plug_changed_iface_ids);
     vif_plug_provider_destroy_all();
+
+    if (ovs_idl_txn_inc_next_cfg) {
+        ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
+        ovs_idl_txn_inc_next_cfg = NULL;
+    }
 
     ovsdb_idl_loop_destroy(&ovs_idl_loop);
     ovsdb_idl_loop_destroy(&ovnsb_idl_loop);
