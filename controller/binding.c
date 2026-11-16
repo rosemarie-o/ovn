@@ -464,7 +464,6 @@ update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
             remove_stale_qos_entry(node->name,
                                    ovsrec_port_by_qos,
                                    qos_table, qos_map);
-            qos_synced = false;
         }
         free(qos_port);
         shash_delete(&_qos_ports, node);
