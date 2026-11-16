@@ -8651,6 +8651,7 @@ main(int argc, char *argv[])
     /* Main loop. */
     int ovnsb_txn_status = 1;
     struct tracked_acl_ids *tracked_acl_ids = NULL;
+    struct ovsdb_idl_txn *ovs_idl_txn_inc_next_cfg = NULL;
     while (!exit_args.exiting) {
         ovsrcu_quiesce_end();
 
@@ -8771,7 +8772,7 @@ main(int argc, char *argv[])
          * are also true. How can I do this without creating a bunch of bools?
          * The same applies to inside functions with synced vs installed, but
          * that's easier. But remember to do that. */
-        bool increment_next_cfg = true;
+        bool increment_next_cfg = false;
 
         /* Enable ACL matching for double tagged traffic. */
         if (ovs_idl_txn && cfg) {
@@ -9147,14 +9148,9 @@ main(int argc, char *argv[])
                                      chassis, mac_cache_data);
                     }
 
-                    if (ovs_idl_txn && cfg && increment_next_cfg) {
-                        ovsrec_open_vswitch_verify_next_cfg(cfg);
-                        ovsdb_idl_txn_increment(ovs_idl_txn, &cfg->header_,
-                                    &ovsrec_open_vswitch_col_next_cfg, false);
-                    }
-                    /* Wait for patch ports to be installed and synced before
-                     * incrementing nb_cfg so that --wait=hv properly waits
-                     * for patch ports. */
+                    /* Wait for config to be applied to OVS before incrementing
+                     * nb_cfg so --wait=hv actually waits for things like patch
+                     * ports, geneve tunnels, etc. */
                     if (cfg && cfg->cur_cfg >= next_cfg) {
                         /* Snapshot (nb_cfg, sb_ts) atomically from SB_Global
                          * and pair them through the barrier ack so the
@@ -9315,6 +9311,19 @@ main(int argc, char *argv[])
         }
 
         int ovs_txn_status = ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop);
+
+        /* Send a txn that only increments next_cfg. */
+        if (increment_next_cfg && cfg) {
+            ovs_idl_txn_inc_next_cfg = ovsdb_idl_txn_create(ovs_idl_loop.idl);
+            ovsdb_idl_txn_increment(ovs_idl_txn_inc_next_cfg, &cfg->header_,
+                                    &ovsrec_open_vswitch_col_next_cfg, true);
+            enum ovsdb_idl_txn_status inc_txn_status = ovsdb_idl_txn_commit(ovs_idl_txn_inc_next_cfg);
+            if (inc_txn_status == TXN_SUCCESS) {
+                next_cfg = ovsdb_idl_txn_get_increment_new_value(ovs_idl_txn_inc_next_cfg);
+                ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
+            }
+        }
+
         if (!ovs_txn_status) {
             /* The transaction failed. */
             vif_plug_clear_deleted(
