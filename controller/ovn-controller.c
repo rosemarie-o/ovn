@@ -8780,7 +8780,6 @@ main(int argc, char *argv[])
              * because many txns are just setting external ids, ovn-installed, etc */
             /* The read & verify of read-verify-write. */
             next_cfg = cfg->next_cfg;
-            ovsrec_open_vswitch_verify_cur_cfg(cfg);
             /* Move increment to later! */
 
             int vlan_limit = smap_get_int(
@@ -9149,6 +9148,7 @@ main(int argc, char *argv[])
                     }
 
                     if (ovs_idl_txn && cfg && increment_next_cfg) {
+                        ovsrec_open_vswitch_verify_next_cfg(cfg);
                         ovsdb_idl_txn_increment(ovs_idl_txn, &cfg->header_,
                                     &ovsrec_open_vswitch_col_next_cfg, false);
                     }
