@@ -9009,7 +9009,7 @@ main(int argc, char *argv[])
                             ovsrec_port_by_name, br_int, chassis,
                             &runtime_data->local_datapaths);
                         stopwatch_stop(PATCH_RUN_STOPWATCH_NAME, time_msec());
-                        if (!patch_ports_synced) {
+                        if (patch_ports_synced) {
                             increment_next_cfg = true && increment_next_cfg;
                         } else {
                             increment_next_cfg = false;
@@ -9148,15 +9148,14 @@ main(int argc, char *argv[])
                                      chassis, mac_cache_data);
                     }
 
-                    if (ovs_idl_txn && cfg && (increment_next_cfg)) {
+                    if (ovs_idl_txn && cfg && increment_next_cfg) {
                         ovsdb_idl_txn_increment(ovs_idl_txn, &cfg->header_,
                                     &ovsrec_open_vswitch_col_next_cfg, false);
                     }
                     /* Wait for patch ports to be installed and synced before
                      * incrementing nb_cfg so that --wait=hv properly waits
                      * for patch ports. */
-                    if (cfg && cfg->cur_cfg >= next_cfg
-                        && patch_ports_synced) {
+                    if (cfg && cfg->cur_cfg >= next_cfg) {
                         /* Snapshot (nb_cfg, sb_ts) atomically from SB_Global
                          * and pair them through the barrier ack so the
                          * eventual completion can be attributed to the
