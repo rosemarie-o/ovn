@@ -8689,6 +8689,11 @@ main(int argc, char *argv[])
                 next_cfg = ovsdb_idl_txn_get_increment_new_value(ovs_idl_txn_inc_next_cfg);
                 ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
                 ovs_idl_txn_inc_next_cfg = NULL;
+            } else if (inc_txn_status == TXN_INCOMPLETE) {
+                /* Let it be so it can try to commit. */
+            } else {
+                ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
+                ovs_idl_txn_inc_next_cfg = NULL;
             }
         }
 
@@ -8779,10 +8784,10 @@ main(int argc, char *argv[])
         pinctrl_update_swconn(br_int_remote.target,
                               br_int_remote.probe_interval);
 
-        /* Hm. I need this to only be true only when all of the results we grab
-         * are also true. How can I do this without creating a bunch of bools?
-         * The same applies to inside functions with synced vs installed, but
-         * that's easier. But remember to do that. */
+        /* This should be true when ovn-controller is waiting on a txn it sent
+         * to OVS to be fully applied by OVS. Only then can we increment
+         * next_cfg, and wait for the config to be applied, before finally
+         * incrementing nb_cfg. */
         bool increment_next_cfg = false;
 
         /* Enable ACL matching for double tagged traffic. */
@@ -9043,7 +9048,6 @@ main(int argc, char *argv[])
                                          &vif_plug_ctx_out);
                             stopwatch_stop(VIF_PLUG_RUN_STOPWATCH_NAME,
                                            time_msec());
-                            //increment_next_cfg = true;
                         }
                         stopwatch_start(PINCTRL_RUN_STOPWATCH_NAME,
                                         time_msec());
