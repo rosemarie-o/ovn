@@ -458,7 +458,6 @@ update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
             if (pb) {
                 configure_qos(pb, ovs_idl_txn, ovsrec_port_by_qos, qos_table,
                               qos_map, ovs_table, bridge_table);
-                qos_synced = false;
             }
         } else {
             remove_stale_qos_entry(node->name,
