@@ -48874,14 +48874,24 @@ AT_CLEANUP
 ])
 
 OVN_FOR_EACH_NORTHD([
-AT_SETUP([ovn-controller increments OVS next_cfg handshake])
+AT_SETUP([ovn-controller increments OVS next_cfg only for real config changes])
 
-# Bare-bones detector: does ovn-controller's OVS DB transaction actually
-# bump the Open_vSwitch:next_cfg COLUMN, and does ovs-vswitchd confirm by
-# advancing cur_cfg?  Verifies the DB-side handshake end to end.
-#
-# NOTE: never use `ovs-vsctl --wait=hv` in this test -- it bumps next_cfg
-# itself and would corrupt the counters we assert on.
+dnl ovn-controller must bump Open_vSwitch:next_cfg exactly when its OVS-side
+dnl transaction writes configuration that ovs-vswitchd has to act on, and
+dnl must leave next_cfg alone when it only writes bookkeeping (external_ids,
+dnl ovn-installed, ...).  This test covers patch_run() and encaps_run();
+dnl ct_zones_commit(), update_qos() and bfd_run() are covered by the
+dnl companion test below.
+dnl
+dnl Never use a mutating ovs-vsctl without --no-wait here: ovs-vsctl bumps
+dnl next_cfg itself and would corrupt the counters being asserted on.
+dnl Read-only "get" and "wait-until" are safe because that increment is
+dnl suppressed for a transaction that makes no updates.
+dnl
+dnl sleep_ovs is deliberately not used.  It SIGSTOPs all of ovs-vswitchd,
+dnl the OpenFlow side included, so Chassis_Private:nb_cfg stops advancing
+dnl whether or not ovn-controller gates the nb_cfg report on next_cfg.  Any
+dnl assertion made while it is frozen is therefore vacuous.
 
 ovn_start
 
@@ -48899,65 +48909,252 @@ check as hv1 ovs-vsctl --no-wait -- add-port br-int vif1 \
                     -- set Interface vif1 external_ids:iface-id=lsp1 \
                     -- set Interface vif1 type=internal
 wait_for_ports_up
-
-# --- Phase 0: quiesce (everything awake — convergence achievable) ----
-OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)" = \
-                    "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)"])
-# hv1 has echoed every generation SB knows about.
-OVS_WAIT_UNTIL([test "$(fetch_column Chassis_Private nb_cfg name=hv1)" = \
-                    "$(fetch_column SB_Global nb_cfg)"])
-next0=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
-cur0=$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)
-ch_nb0=$(fetch_column Chassis_Private nb_cfg name=hv1)
-sb_nb0=$(fetch_column SB_Global nb_cfg)
-
-# --- Phase 1: freeze ---------------------------------------------------
-sleep_ovs hv1
-
-# --- Phase 2: trigger (this --wait=sb ALSO bumps the NB generation) ----
-check ovn-nbctl --wait=sb lsp-add-localnet-port ls1 ln1 phys
-OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)" \
-                    -gt $next0])
-AT_CHECK([test "$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)" = "$cur0"])
-
-# --- Phase 2.5: negative control — pure assertion, NO wait -------------
-# --wait=sb returned, so the new generation is in SB for sure.
-AT_CHECK([test "$(fetch_column SB_Global nb_cfg)" -gt $sb_nb0])
-# hv1 must NOT echo it: the gate is closed (cur < next) and no barrier
-# can be replied to.  Whether or not the controller has seen the new
-# generation yet, it cannot stamp it — so no polling needed, and none
-# is possible: this can never converge while frozen.
-AT_CHECK([test "$(fetch_column Chassis_Private nb_cfg name=hv1)" = "$ch_nb0"])
-
-# Bump the NB generation while the freeze holds.  --wait=sb only waits
-# for northd, which is unaffected by hv1's frozen ovs-vswitchd.
-check ovn-nbctl --wait=sb sync
-
-# --- Phase 3: release and confirm -------------------------------------
-wake_up_ovs hv1
-OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)" = "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)"])
-AT_CHECK([test "$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)" -gt $cur0])
-
-# --- Phase 4: patch port installed --------------------------------------
-# ofport is assigned by ovs-vswitchd during reconfiguration; its OVSDB
-# write may land slightly after cur_cfg, so keep this a bounded poll.
-check ovs-vsctl wait-until Interface patch-br-int-to-ln1 "ofport>0"
-ofport=$(ovs-vsctl --bare --columns ofport find Interface name=patch-br-int-to-ln1)
-
-# The flow referencing that ofport is installed by ovn-controller after
-# it SEES the ofport (engine recompute -> ofctrl_put), so poll for it too.
-OVS_WAIT_UNTIL([ovs-ofctl dump-flows br-int table=OFTABLE_PHY_TO_LOG \
-    | grep -q in_port=$ofport])
-
-# --- Phase 5: conclusion: the generation is now reported ----------------
-# With the gate open (cur == next) and the barrier acked, hv1 must
-# report the new generation.
-echo "right before chassis priv check"
-OVS_WAIT_UNTIL([test "$(fetch_column Chassis_Private nb_cfg name=hv1)" -gt $ch_nb0])
-
-# Capstone: the user-visible behavior, end to end, must now converge.
 check ovn-nbctl --wait=hv sync
 
-OVN_CLEANUP([hv1])
+dnl Quiesced means ovs-vswitchd has echoed every generation ovn-controller
+dnl asked for, the chassis has reported the current nb_cfg generation, and
+dnl ovn-controller's own OVS-side bookkeeping write for that generation has
+dnl landed.  The last condition is what makes a snapshot taken right after
+dnl this race-free: it proves no ovn-controller OVS transaction is still in
+dnl flight.
+wait_quiesced() {
+    OVS_WAIT_UNTIL([
+        sb_nb=$(fetch_column SB_Global nb_cfg)
+        ch_nb=$(fetch_column Chassis_Private nb_cfg name=hv1)
+        ovs_nb=$(as hv1 ovs-vsctl --if-exists --bare get Bridge br-int external_ids:ovn-nb-cfg | xargs)
+        cur=$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)
+        next=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+        test -n "$sb_nb" && test "$ch_nb" = "$sb_nb" &&
+            test "$ovs_nb" = "$sb_nb" && test "$cur" = "$next"
+    ])
+}
+
+dnl Forces ovn-controller main loop iterations in which the only thing it
+dnl writes to the OVS DB is bookkeeping, and checks that none of them moved
+dnl next_cfg.  Waiting for Bridge:external_ids:ovn-nb-cfg to catch up is the
+dnl progress oracle: that key is itself written by ovn-controller, so the
+dnl assertion cannot pass merely because the controller has not run yet.
+check_idle_no_increment() {
+    expected=$1
+    for i in 1 2 3; do
+        check ovn-nbctl --wait=sb sync
+        sb_nb=$(fetch_column SB_Global nb_cfg)
+        OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl --if-exists --bare get Bridge br-int external_ids:ovn-nb-cfg | xargs)" = "$sb_nb"])
+        got=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+        echo "idle round $i: next_cfg=$got, expected $expected"
+        AT_CHECK([test "$got" = "$expected"])
+    done
+}
+
+dnl A forced recompute re-runs the OVS writers from scratch with nothing to
+dnl write.  If any of them reports "I wrote configuration" merely because it
+dnl ran, next_cfg moves here.  This is only a valid control while no ct-zone
+dnl limit is configured; see the companion test for why.
+check_recompute_no_increment() {
+    expected=$1
+    for i in 1 2 3; do
+        runs=$(as hv1 ovn-appctl -t ovn-controller inc-engine/show-stats runtime_data recompute)
+        check as hv1 ovn-appctl -t ovn-controller inc-engine/recompute
+        OVS_WAIT_UNTIL([test $(as hv1 ovn-appctl -t ovn-controller inc-engine/show-stats runtime_data recompute) -gt $runs])
+        got=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+        echo "recompute round $i: next_cfg=$got, expected $expected"
+        AT_CHECK([test "$got" = "$expected"])
+    done
+}
+
+wait_quiesced
+next0=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+cur0=$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)
+sb_nb0=$(fetch_column SB_Global nb_cfg)
+echo "baseline: next_cfg=$next0 cur_cfg=$cur0 sb nb_cfg=$sb_nb0"
+
+dnl Nothing left to configure, so next_cfg must stand still.
+check_idle_no_increment $next0
+check_recompute_no_increment $next0
+
+dnl patch_run(): a localnet port on a switch that has a local VIF makes
+dnl ovn-controller create patch ports, which ovs-vswitchd must apply.
+check ovn-nbctl --wait=sb lsp-add-localnet-port ls1 ln1 phys
+OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)" -gt $next0])
+dnl The increment corresponded to configuration ovs-vswitchd really applied,
+dnl not to a spurious bump.
+check as hv1 ovs-vsctl wait-until Interface patch-br-int-to-ln1 "ofport>0"
+
+wait_quiesced
+next1=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+cur1=$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)
+echo "after patch ports: next_cfg=$next1 delta=$((next1 - next0)) cur_cfg=$cur1"
+dnl One configuration change costs a small bounded number of increments,
+dnl not one per main loop iteration.
+AT_CHECK([test $((next1 - next0)) -le 3])
+AT_CHECK([test "$cur1" -gt "$cur0"])
+
+dnl The patch ports exist now, so a writer that reports "dirty" whenever it
+dnl sees them -- rather than only when it changes them -- shows up here.
+check_idle_no_increment $next1
+check_recompute_no_increment $next1
+
+dnl encaps_run(): a second chassis makes ovn-controller create a tunnel port
+dnl on hv1.  Bringing hv2 up only touches hv2's Open_vSwitch, so hv1's
+dnl counters stay clean.
+sim_add hv2
+as hv2
+check ovs-vsctl add-br br-phys
+check ovs-vsctl set open . external-ids:ovn-bridge-mappings=phys:br-phys
+ovn_attach n br-phys 192.168.0.2
+
+OVS_WAIT_UNTIL([test -n "$(as hv1 ovs-vsctl --bare --columns name find Interface type=geneve)"])
+OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)" -gt $next1])
+tun=$(as hv1 ovs-vsctl --bare --columns name find Interface type=geneve)
+check as hv1 ovs-vsctl wait-until Interface $tun "ofport>0"
+
+wait_quiesced
+next2=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+echo "after tunnel $tun: next_cfg=$next2 delta=$((next2 - next1))"
+AT_CHECK([test $((next2 - next1)) -le 3])
+
+check_idle_no_increment $next2
+check_recompute_no_increment $next2
+
+dnl End to end: --wait=hv converges and the chassis reports a generation
+dnl later than the one it was on before any of the above was configured.
+check ovn-nbctl --wait=hv sync
+check_row_count Chassis_Private 1 name=hv1 nb_cfg\>$sb_nb0
+
+ofport=$(as hv1 ovs-vsctl --bare --columns ofport find Interface name=patch-br-int-to-ln1)
+AT_CHECK([as hv1 ovs-ofctl dump-flows br-int table=OFTABLE_PHY_TO_LOG | grep -q in_port=$ofport])
+
+OVN_CLEANUP([hv1], [hv2])
+AT_CLEANUP
+])
+
+OVN_FOR_EACH_NORTHD([
+AT_SETUP([ovn-controller increments OVS next_cfg for ct zones, QoS and BFD])
+
+dnl Companion to the test above, for the remaining ovn-controller writers of
+dnl real OVS configuration: ct_zones_commit() (Datapath:ct_zones),
+dnl update_qos() (QoS and Queue rows) and bfd_run() (Interface:bfd).  Each
+dnl one gets a positive phase, and an idle control afterwards to catch a
+dnl writer that stays dirty once its objects exist.
+dnl
+dnl Same rule as above: never use a mutating ovs-vsctl without --no-wait.
+dnl
+dnl Unlike the test above, this one does not use forced recomputes as a
+dnl negative control.  Once a ct-zone limit is configured, ct_zones_restore()
+dnl resets every ct_zone's limit to -1 and ct_zones_limits_sync() then
+dnl re-applies it, so a full recompute legitimately rewrites
+dnl Datapath:ct_zones.  The idle control forces ordinary main loop
+dnl iterations instead, which is the case that must never increment.
+
+ovn_start
+
+net_add n
+check ovn-nbctl ls-add ls1
+check ovn-nbctl lsp-add-localnet-port ls1 ln1 phys
+
+for i in 1 2; do
+    sim_add hv$i
+    as hv$i
+    check ovs-vsctl add-br br-phys
+    check ovs-vsctl set open . external-ids:ovn-bridge-mappings=phys:br-phys
+    ovn_attach n br-phys 192.168.0.$i
+done
+
+check ovn-nbctl lsp-add ls1 lsp1
+check ovn-nbctl lsp-set-addresses lsp1 "f0:00:00:00:00:01 192.168.1.101"
+check as hv1 ovs-vsctl --no-wait -- add-port br-int vif1 \
+                    -- set Interface vif1 external_ids:iface-id=lsp1 \
+                    -- set Interface vif1 type=internal
+
+dnl A logical router port that later gets two gateway chassis gives northd an
+dnl HA_Chassis_Group with two members, which is what makes ovn-controller
+dnl enable BFD on the tunnel between them.
+check ovn-nbctl lr-add lr0
+check ovn-nbctl lrp-add lr0 lrp1 00:00:01:01:02:03 192.168.1.1/24
+check ovn-nbctl lsp-add-router-port ls1 rp1 lrp1
+
+wait_for_ports_up
+check ovn-nbctl --wait=hv sync
+
+OVS_WAIT_UNTIL([test -n "$(as hv1 ovs-vsctl --bare --columns name find Interface type=geneve)"])
+tun=$(as hv1 ovs-vsctl --bare --columns name find Interface type=geneve)
+check as hv1 ovs-vsctl wait-until Interface $tun "ofport>0"
+check as hv1 ovs-vsctl wait-until Interface patch-br-int-to-ln1 "ofport>0"
+
+wait_quiesced() {
+    OVS_WAIT_UNTIL([
+        sb_nb=$(fetch_column SB_Global nb_cfg)
+        ch_nb=$(fetch_column Chassis_Private nb_cfg name=hv1)
+        ovs_nb=$(as hv1 ovs-vsctl --if-exists --bare get Bridge br-int external_ids:ovn-nb-cfg | xargs)
+        cur=$(as hv1 ovs-vsctl get Open_vSwitch . cur_cfg)
+        next=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+        test -n "$sb_nb" && test "$ch_nb" = "$sb_nb" &&
+            test "$ovs_nb" = "$sb_nb" && test "$cur" = "$next"
+    ])
+}
+
+check_idle_no_increment() {
+    expected=$1
+    for i in 1 2 3; do
+        check ovn-nbctl --wait=sb sync
+        sb_nb=$(fetch_column SB_Global nb_cfg)
+        OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl --if-exists --bare get Bridge br-int external_ids:ovn-nb-cfg | xargs)" = "$sb_nb"])
+        got=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+        echo "idle round $i: next_cfg=$got, expected $expected"
+        AT_CHECK([test "$got" = "$expected"])
+    done
+}
+
+wait_quiesced
+next0=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+sb_nb0=$(fetch_column SB_Global nb_cfg)
+echo "baseline: next_cfg=$next0 sb nb_cfg=$sb_nb0"
+check_idle_no_increment $next0
+
+dnl update_qos(): qos options on a logical port whose switch has a localnet
+dnl port make ovn-controller create QoS and Queue rows on the physical
+dnl bridge.
+check ovn-nbctl set Logical_Switch_Port lsp1 options:qos_min_rate=200000
+check ovn-nbctl --wait=sb set Logical_Switch_Port lsp1 options:qos_max_rate=350000
+OVS_WAIT_UNTIL([test $(as hv1 ovs-vsctl list qos | grep -c linux-htb) -eq 1])
+OVS_WAIT_UNTIL([test $(as hv1 ovs-vsctl list queue | grep -c 'max-rate="350000"') -eq 1])
+OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)" -gt $next0])
+
+wait_quiesced
+next1=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+echo "after QoS: next_cfg=$next1 delta=$((next1 - next0))"
+AT_CHECK([test $((next1 - next0)) -le 3])
+check_idle_no_increment $next1
+
+dnl ct_zones_commit(): a ct-zone limit is what makes ovn-controller populate
+dnl Datapath:ct_zones.  Without a limit it only writes the zone ids into
+dnl Bridge:external_ids, which is bookkeeping and must not increment.
+check ovn-nbctl --wait=sb set Logical_Switch ls1 other_config:ct-zone-limit=10
+OVS_WAIT_UNTIL([test $(as hv1 ovs-vsctl --no-headings --format=table list CT_Zone | wc -l) -gt 0])
+OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)" -gt $next1])
+
+wait_quiesced
+next2=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+echo "after ct zone limits: next_cfg=$next2 delta=$((next2 - next1))"
+AT_CHECK([test $((next2 - next1)) -le 3])
+check_idle_no_increment $next2
+
+dnl bfd_run(): giving the router port two gateway chassis makes
+dnl ovn-controller enable BFD on hv1's tunnel to hv2.
+check ovn-nbctl lrp-set-gateway-chassis lrp1 hv1 20
+check ovn-nbctl --wait=sb lrp-set-gateway-chassis lrp1 hv2 10
+OVS_WAIT_UNTIL([as hv1 ovs-vsctl --bare --columns bfd find Interface name=$tun | grep -q enable=true])
+OVS_WAIT_UNTIL([test "$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)" -gt $next2])
+
+wait_quiesced
+next3=$(as hv1 ovs-vsctl get Open_vSwitch . next_cfg)
+echo "after BFD: next_cfg=$next3 delta=$((next3 - next2))"
+AT_CHECK([test $((next3 - next2)) -le 3])
+check_idle_no_increment $next3
+
+check ovn-nbctl --wait=hv sync
+check_row_count Chassis_Private 1 name=hv1 nb_cfg\>$sb_nb0
+
+OVN_CLEANUP([hv1], [hv2])
 AT_CLEANUP
 ])
