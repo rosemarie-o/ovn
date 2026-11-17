@@ -64,6 +64,8 @@ struct tunnel_ctx {
     const struct ovsrec_bridge *br_int;
     const struct sbrec_chassis *this_chassis;
     bool is_ha_chassis_member;
+
+    bool updated;               /* Set when a write to 'ovs_txn' is staged. */
 };
 
 struct tunnel_node {
@@ -302,11 +304,17 @@ tunnel_add(struct tunnel_ctx *tc,
         && tunnel->port->n_interfaces == 1
         && !strcmp(tunnel->port->interfaces[0]->type, encap->type)
         && smap_equal(&tunnel->port->interfaces[0]->options, &options)) {
+        const char *transient = smap_get(&tunnel->port->other_config,
+                                         "transient");
         if (tc->is_ha_chassis_member) {
-            ovsrec_port_update_other_config_setkey(tunnel->port, "transient",
-                                                   "true");
-        } else if (smap_get(&tunnel->port->other_config, "transient")) {
+            if (!transient || strcmp(transient, "true")) {
+                ovsrec_port_update_other_config_setkey(tunnel->port,
+                                                       "transient", "true");
+                tc->updated = true;
+            }
+        } else if (transient) {
             ovsrec_port_update_other_config_delkey(tunnel->port, "transient");
+            tc->updated = true;
         }
 
         if (old_id_format) {
@@ -317,6 +325,7 @@ tunnel_add(struct tunnel_ctx *tc,
                                                    tunnel_entry_id);
             ovsrec_interface_update_external_ids_setkey(
                 tunnel->port->interfaces[0], OVN_TUNNEL_ID, tunnel_entry_id);
+            tc->updated = true;
 
             shash_find_and_delete(&tc->tunnel, tunnel_entry_id_old);
         } else {
@@ -356,6 +365,7 @@ tunnel_add(struct tunnel_ctx *tc,
     }
 
     ovsrec_bridge_update_ports_addvalue(tc->br_int, port);
+    tc->updated = true;
 
     sset_add_and_free(&tc->port_names, port_name);
 
@@ -459,10 +469,16 @@ chassis_tzones_overlap(const struct sset *transport_zones,
     return false;
 }
 
-static void
+/* Removes from 'old_br_int' the tunnel ports whose name starts with 'prefix'.
+ *
+ * Returns true if a change was staged in the OVS database transaction, false
+ * if there was no such port. */
+static bool
 clear_old_tunnels(const struct ovsrec_bridge *old_br_int, const char *prefix,
                   size_t prefix_len)
 {
+    bool updated = false;
+
     for (size_t i = 0; i < old_br_int->n_ports; i++) {
         const struct ovsrec_port *port = old_br_int->ports[i];
         const char *id = smap_get(&port->external_ids, OVN_TUNNEL_ID);
@@ -473,8 +489,11 @@ clear_old_tunnels(const struct ovsrec_bridge *old_br_int, const char *prefix,
             VLOG_DBG("Clearing old tunnel port \"%s\" (%s) from bridge "
                      "\"%s\".", port->name, id, old_br_int->name);
             ovsrec_bridge_update_ports_delvalue(old_br_int, port);
+            updated = true;
         }
     }
+
+    return updated;
 }
 
 static bool
@@ -543,6 +562,7 @@ create_evpn_tunnels(struct tunnel_ctx *tc)
             ovsrec_port_set_external_ids(port, &id);
 
             ovsrec_bridge_update_ports_addvalue(tc->br_int, port);
+            tc->updated = true;
         }
 
         if (!is_evpn_tunnel_port(port, vxlan_port)) {
@@ -558,6 +578,7 @@ create_evpn_tunnels(struct tunnel_ctx *tc)
             ovsrec_port_set_external_ids(port, &id);
 
             ovsrec_port_set_interfaces(port, &iface, 1);
+            tc->updated = true;
         }
 
         free(name);
@@ -665,6 +686,7 @@ flow_based_tunnel_ensure(struct tunnel_ctx *tc, const char *tunnel_type,
 
     /* Add to bridge. */
     ovsrec_bridge_update_ports_addvalue(tc->br_int, port);
+    tc->updated = true;
 
     VLOG_INFO("Created flow-based %s tunnel port: %s", tunnel_type, port_name);
 
@@ -734,6 +756,12 @@ create_port_based_tunnels(struct tunnel_ctx *tc,
     }
 }
 
+/* Creates, updates and removes the OVS tunnel ports that this chassis needs
+ * in order to reach the other chassis in its transport zones.
+ *
+ * Returns true if nothing was written to the OVS database, false if a change
+ * was staged in 'ovs_idl_txn' and therefore ovs-vswitchd still has to apply
+ * it. */
 bool
 encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
            struct ovsdb_idl_txn *ovnsb_idl_txn,
@@ -768,8 +796,9 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
             if (!strcmp(br->name, br_int->name)) {
                 continue;
             }
-            clear_old_tunnels(br, tunnel_prefix, prefix_len);
-            encaps_synced = false;
+            if (clear_old_tunnels(br, tunnel_prefix, prefix_len)) {
+                encaps_synced = false;
+            }
         }
 
         free(tunnel_prefix);
@@ -779,8 +808,7 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
          * the old one. */
         const struct ovsrec_bridge *old_br_int =
             get_bridge(bridge_table, current_br_int_name);
-        if (old_br_int) {
-            clear_old_tunnels(old_br_int, "", 0);
+        if (old_br_int && clear_old_tunnels(old_br_int, "", 0)) {
             encaps_synced = false;
         }
 
@@ -807,16 +835,6 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
     for (size_t i = 0; i < br_int->n_ports; i++) {
         const struct ovsrec_port *port = br_int->ports[i];
         sset_add(&tc.port_names, port->name);
-
-        for (size_t j = 0; j < port->n_interfaces; j++) {
-            const struct ovsrec_interface *iface = port->interfaces[j];
-
-            /* An ofport of 0 means that it has not been assigned yet and
-             * -1 means that ovs-vswitchd failed to add the interface. */
-            if (!iface->n_ofport || *iface->ofport < 1) {
-                encaps_synced = false;
-            }
-        }
 
         const char *id = smap_get(&port->external_ids, OVN_TUNNEL_ID);
         if (id) {
@@ -854,9 +872,6 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
     }
 
     create_evpn_tunnels(&tc);
-    if  (!shash_is_empty(&tc.tunnel) || !shash_is_empty(&tc.evpn_tunnels)) {
-        encaps_synced = false;
-    }
 
     /* Delete any existing OVN tunnels that were not still around. */
     struct shash_node *node;
@@ -865,6 +880,7 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
         ovsrec_bridge_update_ports_delvalue(tunnel->bridge, tunnel->port);
         shash_delete(&tc.tunnel, node);
         free(tunnel);
+        tc.updated = true;
     }
 
     /* Delete any stale EVPN tunnels. */
@@ -872,6 +888,11 @@ encaps_run(struct ovsdb_idl_txn *ovs_idl_txn,
         const struct ovsrec_port *port = node->data;
         ovsrec_bridge_update_ports_delvalue(br_int, port);
         shash_delete(&tc.evpn_tunnels, node);
+        tc.updated = true;
+    }
+
+    if (tc.updated) {
+        encaps_synced = false;
     }
 
     shash_destroy(&tc.tunnel);

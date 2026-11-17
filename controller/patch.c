@@ -116,7 +116,11 @@ create_patch_port(struct ovsdb_idl_txn *ovs_idl_txn,
     return PATCH_PORT_INSERTED;
 }
 
-static void
+/* Removes 'port' from whichever bridge in 'bridge_table' owns it.
+ *
+ * Returns true if a change was staged in the OVS database transaction, false
+ * if no bridge owns 'port'. */
+static bool
 remove_port(const struct ovsrec_bridge_table *bridge_table,
             const struct ovsrec_port *port)
 {
@@ -132,9 +136,10 @@ remove_port(const struct ovsrec_bridge_table *bridge_table,
                 continue;
             }
             ovsport_remove(bridge, port);
-            return;
+            return true;
         }
     }
+    return false;
 }
 
 void
@@ -185,8 +190,8 @@ add_ovs_bridge_mappings(const struct ovsrec_open_vswitch_table *ovs_table,
 /* Adds the patch ports needed by the port bindings of type 'pb_type' that are
  * local to this chassis.
  *
- * Returns true if all of those patch ports are already present in the
- * database. */
+ * Returns true if nothing was written to the OVS database, false if a patch
+ * port was created and therefore ovs-vswitchd still has to apply it. */
 static bool
 add_bridge_mappings_by_type(struct ovsdb_idl_txn *ovs_idl_txn,
                             struct ovsdb_idl_index *sbrec_port_binding_by_type,
@@ -260,8 +265,10 @@ add_bridge_mappings_by_type(struct ovsdb_idl_txn *ovs_idl_txn,
                                          br_ln, name2, br_int, name1,
                                          existing_ports);
 
-        synced = synced && (br_int_result == PATCH_PORT_EXISTS) &&
-                 (br_ln_result == PATCH_PORT_EXISTS);
+        if (br_int_result == PATCH_PORT_INSERTED
+            || br_ln_result == PATCH_PORT_INSERTED) {
+            synced = false;
+        }
         free(name1);
         free(name2);
     }
@@ -273,8 +280,8 @@ add_bridge_mappings_by_type(struct ovsdb_idl_txn *ovs_idl_txn,
  * the local bridge mappings.  Removes any patch ports for bridge mappings that
  * already existed from 'existing_ports'.
  *
- * Returns true if all of the required patch ports are already present in the
- * database. */
+ * Returns true if nothing was written to the OVS database, false if a patch
+ * port was created and therefore ovs-vswitchd still has to apply it. */
 static bool
 add_bridge_mappings(struct ovsdb_idl_txn *ovs_idl_txn,
                     struct ovsdb_idl_index *sbrec_port_binding_by_type,
@@ -350,8 +357,9 @@ patch_port_is_installed(const struct ovsrec_port *port)
  * that are no longer needed.  The database is only updated if 'ovs_idl_txn'
  * is non-NULL.
  *
- * Returns true if the database already reflects the required set of patch
- * ports and ovs-vswitchd has assigned an ofport number to each of them. */
+ * Returns true if nothing was written to the OVS database, false if a patch
+ * port was created or removed and therefore ovs-vswitchd still has to apply
+ * it. */
 bool
 patch_run(struct ovsdb_idl_txn *ovs_idl_txn,
           struct ovsdb_idl_index *sbrec_port_binding_by_type,
@@ -360,7 +368,7 @@ patch_run(struct ovsdb_idl_txn *ovs_idl_txn,
           struct ovsdb_idl_index *ovsrec_port_by_name,
           const struct ovsrec_bridge *br_int,
           const struct sbrec_chassis *chassis,
-          const struct hmap *local_datapaths)
+          const struct hmap *local_datapaths, bool *ports_installed)
 {
     /* Figure out what patch ports already exist.
      *
@@ -398,7 +406,6 @@ patch_run(struct ovsdb_idl_txn *ovs_idl_txn,
     /* The physical flows that use a patch port can't be installed until
      * ovs-vswitchd assigns it an ofport number, so the configuration is not
      * applied yet even though the port is already in the database. */
-    bool ports_installed = true;
     struct shash_node *node;
     SHASH_FOR_EACH (node, &existing_ports) {
         if (!patch_port_is_installed(node->data)) {
@@ -415,7 +422,7 @@ patch_run(struct ovsdb_idl_txn *ovs_idl_txn,
                                       &existing_ports, chassis,
                                       local_datapaths);
 
-    if (!ports_installed || !shash_is_empty(&existing_ports)) {
+    if (!shash_is_empty(&existing_ports)) {
         synced = false;
     }
 
@@ -430,8 +437,9 @@ patch_run(struct ovsdb_idl_txn *ovs_idl_txn,
          * data is not completely downloaded yet after last restart of
          * ovn-controller.  Otherwise it may cause unncessary dataplane
          * interruption during restart/upgrade. */
-        if (!daemon_started_recently() && ovs_idl_txn) {
-            remove_port(bridge_table, port);
+        if (!daemon_started_recently() && ovs_idl_txn
+            && remove_port(bridge_table, port)) {
+            synced = false;
         }
     }
     shash_destroy(&existing_ports);

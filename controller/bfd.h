@@ -36,7 +36,8 @@ bool bfd_run(const struct ovsrec_interface_table *,
              const struct sset *,
              const struct sbrec_chassis *,
              const struct sbrec_sb_global_table *,
-             const struct ovsrec_open_vswitch_table *);
+             const struct ovsrec_open_vswitch_table *,
+             bool *ports_installed);
 
 void bfd_calculate_chassis(
     const struct sbrec_chassis *,

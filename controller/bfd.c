@@ -180,15 +180,19 @@ bfd_calculate_chassis(
     }
 }
 
-/* Returns true if the database already reflects the desired state, and false
- * if changes need to be made. */
+/* Enables or disables BFD on the tunnel interfaces of 'br_int', as required
+ * by 'bfd_chassis'.
+ *
+ * Returns true if nothing was written to the OVS database, false if a change
+ * was staged and therefore ovs-vswitchd still has to apply it. */
 bool
 bfd_run(const struct ovsrec_interface_table *interface_table,
         const struct ovsrec_bridge *br_int,
         const struct sset *bfd_chassis,
         const struct sbrec_chassis *chassis_rec,
         const struct sbrec_sb_global_table *sb_global_table,
-        const struct ovsrec_open_vswitch_table *ovs_table)
+        const struct ovsrec_open_vswitch_table *ovs_table,
+        bool *ports_installed)
 {
     if (!chassis_rec) {
         return true;
@@ -257,7 +261,7 @@ bfd_run(const struct ovsrec_interface_table *interface_table,
     const struct ovsrec_interface *iface;
     OVSREC_INTERFACE_TABLE_FOR_EACH (iface, interface_table) {
         if (!iface->n_ofport || *iface->ofport < 1) {
-            bfd_synced = false;
+            ports_installed = false;
         }
         if (sset_contains(&tunnels, iface->name)) {
             if (sset_contains(&bfd_ifaces, iface->name)) {

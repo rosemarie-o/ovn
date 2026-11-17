@@ -253,6 +253,13 @@ add_or_del_qos_port(const char *ovn_port, bool add)
  * can be unrecognized for certain NICs or reported too low for virtual
  * interfaces. */
 #define OVN_QOS_MAX_RATE    34359738360ULL
+
+/* Creates or updates, on the OVS egress 'port', the Qos and Queue rows that
+ * implement the QoS configuration requested for 'ovn_port'.
+ *
+ * Returns true if a change was staged in 'ovs_idl_txn', false if nothing was
+ * written because the QoS configuration of 'port' is owned by someone other
+ * than OVN. */
 static bool
 add_ovs_qos_table_entry(struct ovsdb_idl_txn *ovs_idl_txn,
                         const struct ovsrec_port *port,
@@ -325,7 +332,12 @@ add_ovs_qos_table_entry(struct ovsdb_idl_txn *ovs_idl_txn,
     return true;
 }
 
-static void
+/* Removes from the OVS database the Queue row (and, if it was the last one,
+ * the Qos row) that OVN created for 'logical_port'.
+ *
+ * Returns true if a change was staged in the OVS database transaction, false
+ * if there was nothing to remove. */
+static bool
 remove_stale_qos_entry( const char *logical_port,
                        struct ovsdb_idl_index *ovsrec_port_by_qos,
                        const struct ovsrec_qos_table *qos_table,
@@ -335,7 +347,7 @@ remove_stale_qos_entry( const char *logical_port,
             queue_map, hash_string(logical_port, 0),
             logical_port);
     if (!q) {
-        return;
+        return false;
     }
 
     const struct ovsrec_qos *qos;
@@ -367,12 +379,18 @@ remove_stale_qos_entry( const char *logical_port,
             hmap_remove(queue_map, &q->node);
             qos_queue_erase_entry(q);
 
-            return;
+            return true;
         }
     }
+    return false;
 }
 
-static void
+/* Brings the OVS QoS configuration in line with the QoS options of 'pb',
+ * removing any stale configuration if QoS is no longer requested for it.
+ *
+ * Returns true if a change was staged in 'ovs_idl_txn', false if the OVS
+ * database already matched the requested configuration. */
+static bool
 configure_qos(const struct sbrec_port_binding *pb,
               struct ovsdb_idl_txn *ovs_idl_txn,
               struct ovsdb_idl_index *ovsrec_port_by_qos,
@@ -391,12 +409,12 @@ configure_qos(const struct sbrec_port_binding *pb,
 
     if ((!min_rate && !max_rate && !burst) || !queue_id) {
         /* Qos is not configured for this port. */
-        remove_stale_qos_entry(pb->logical_port,
-                               ovsrec_port_by_qos,
-                               qos_table, qos_map);
-        return;
+        return remove_stale_qos_entry(pb->logical_port,
+                                      ovsrec_port_by_qos,
+                                      qos_table, qos_map);
     }
 
+    bool updated = false;
     const char *network = smap_get(&pb->options, "qos_physical_network");
     uint32_t hash = hash_string(pb->logical_port, 0);
     struct qos_queue *q = find_qos_queue(qos_map, hash,
@@ -415,9 +433,10 @@ configure_qos(const struct sbrec_port_binding *pb,
         }
         if (iface) {
             /* Add new QoS entries. */
-            if (add_ovs_qos_table_entry(ovs_idl_txn, port, iface,
-                                        min_rate, max_rate, burst,
-                                        queue_id, pb->logical_port)) {
+            updated = add_ovs_qos_table_entry(ovs_idl_txn, port, iface,
+                                              min_rate, max_rate, burst,
+                                              queue_id, pb->logical_port);
+            if (updated) {
                 if (!q) {
                     q = xzalloc(sizeof *q);
                     hmap_insert(qos_map, &q->node, hash);
@@ -433,8 +452,15 @@ configure_qos(const struct sbrec_port_binding *pb,
         }
         shash_destroy(&bridge_mappings);
     }
+    return updated;
 }
 
+/* Applies the QoS configuration changes that were recorded for the ports
+ * added to or removed from this chassis since the last call.
+ *
+ * Returns true if nothing was written to the OVS database, false if a change
+ * was staged in 'ovs_idl_txn' and therefore ovs-vswitchd still has to apply
+ * it. */
 bool
 update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
            struct ovsdb_idl_txn *ovs_idl_txn,
@@ -455,14 +481,13 @@ update_qos(struct ovsdb_idl_index *sbrec_port_binding_by_name,
         if (qos_port->added) {
             pb = lport_lookup_by_name(sbrec_port_binding_by_name,
                                       node->name);
-            if (pb) {
-                configure_qos(pb, ovs_idl_txn, ovsrec_port_by_qos, qos_table,
-                              qos_map, ovs_table, bridge_table);
+            if (pb && configure_qos(pb, ovs_idl_txn, ovsrec_port_by_qos,
+                                    qos_table, qos_map, ovs_table,
+                                    bridge_table)) {
+                qos_synced = false;
             }
-        } else {
-            remove_stale_qos_entry(node->name,
-                                   ovsrec_port_by_qos,
-                                   qos_table, qos_map);
+        } else if (remove_stale_qos_entry(node->name, ovsrec_port_by_qos,
+                                          qos_table, qos_map)) {
             qos_synced = false;
         }
         free(qos_port);

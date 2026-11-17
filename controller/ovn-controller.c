@@ -962,6 +962,32 @@ done:
     ofctrl_acked_seqnos_destroy(acked_nb_cfg_seqnos);
 }
 
+/* Tries to commit 'txn', a transaction whose only purpose is to increment
+ * Open_vSwitch.next_cfg, and stores the new value of the column in
+ * '*next_cfg' if the commit succeeded.
+ *
+ * Returns 'txn' if the commit is still in progress, so that the caller keeps
+ * retrying it.  Otherwise destroys 'txn' and returns NULL; the caller is
+ * expected to create a new transaction if the increment is still needed.
+ * Failures are deliberately not sticky: holding on to a transaction that can
+ * never complete would disable the barrier for the lifetime of the
+ * process. */
+static struct ovsdb_idl_txn *
+ovs_next_cfg_txn_commit(struct ovsdb_idl_txn *txn, int64_t *next_cfg)
+{
+    enum ovsdb_idl_txn_status status = ovsdb_idl_txn_commit(txn);
+
+    if (status == TXN_INCOMPLETE) {
+        return txn;
+    }
+
+    if (status == TXN_SUCCESS) {
+        *next_cfg = ovsdb_idl_txn_get_increment_new_value(txn);
+    }
+    ovsdb_idl_txn_destroy(txn);
+    return NULL;
+}
+
 static const char *
 get_transport_zones(const struct ovsrec_open_vswitch_table *ovs_table)
 {
@@ -8653,7 +8679,6 @@ main(int argc, char *argv[])
     struct tracked_acl_ids *tracked_acl_ids = NULL;
     struct ovsdb_idl_txn *ovs_idl_txn_inc_next_cfg = NULL;
     int64_t next_cfg = 0;
-    enum ovsdb_idl_txn_status inc_txn_status;
     while (!exit_args.exiting) {
         ovsrcu_quiesce_end();
 
@@ -8684,17 +8709,8 @@ main(int argc, char *argv[])
 
         /* Check status of txn that only increments next_cfg. */
         if (ovs_idl_txn_inc_next_cfg) {
-            inc_txn_status = ovsdb_idl_txn_commit(ovs_idl_txn_inc_next_cfg);
-            if (inc_txn_status == TXN_SUCCESS) {
-                next_cfg = ovsdb_idl_txn_get_increment_new_value(ovs_idl_txn_inc_next_cfg);
-                ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
-                ovs_idl_txn_inc_next_cfg = NULL;
-            } else if (inc_txn_status == TXN_INCOMPLETE) {
-                /* Let it be so it can try to commit. */
-            } else {
-                ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
-                ovs_idl_txn_inc_next_cfg = NULL;
-            }
+            ovs_idl_txn_inc_next_cfg =
+                ovs_next_cfg_txn_commit(ovs_idl_txn_inc_next_cfg, &next_cfg);
         }
 
         struct ovsdb_idl_txn *ovs_idl_txn = ovsdb_idl_loop_run(&ovs_idl_loop);
@@ -8829,7 +8845,7 @@ main(int argc, char *argv[])
             store_chassis_index_if_needed(ovs_table);
         }
 
-        bool patch_ports_synced = true;
+        bool ports_installed = true;
 
         if (ovsdb_idl_has_ever_connected(ovnsb_idl_loop.idl) &&
             northd_version_match && cfg) {
@@ -8995,7 +9011,8 @@ main(int argc, char *argv[])
                                 br_int, &bfd_chassis_data->bfd_chassis,
                                 chassis, sbrec_sb_global_table_get(
                                     ovnsb_idl_loop.idl),
-                                ovs_table
+                                ovs_table,
+                                &ports_installed
                             );
                             stopwatch_stop(
                                 BFD_RUN_STOPWATCH_NAME, time_msec());
@@ -9006,12 +9023,12 @@ main(int argc, char *argv[])
                     runtime_data = engine_get_data(&en_runtime_data);
                     if (runtime_data) {
                         stopwatch_start(PATCH_RUN_STOPWATCH_NAME, time_msec());
-                        patch_ports_synced = patch_run(
+                        bool patch_ports_synced = patch_run(
                             ovs_idl_txn, sbrec_port_binding_by_type,
                             ovsrec_bridge_table_get(ovs_idl_loop.idl),
                             ovsrec_open_vswitch_table_get(ovs_idl_loop.idl),
                             ovsrec_port_by_name, br_int, chassis,
-                            &runtime_data->local_datapaths);
+                            &runtime_data->local_datapaths, &ports_installed);
                         stopwatch_stop(PATCH_RUN_STOPWATCH_NAME, time_msec());
                         increment_next_cfg |= !patch_ports_synced;
 
@@ -9146,7 +9163,7 @@ main(int argc, char *argv[])
                     /* Wait for config to be applied to OVS before incrementing
                      * nb_cfg so --wait=hv actually waits for things like patch
                      * ports, geneve tunnels, etc. */
-                    if (cfg && cfg->cur_cfg >= next_cfg) {
+                    if (ports_installed && cfg && cfg->cur_cfg >= next_cfg) {
                         /* Snapshot (nb_cfg, sb_ts) atomically from SB_Global
                          * and pair them through the barrier ack so the
                          * eventual completion can be attributed to the
@@ -9307,23 +9324,14 @@ main(int argc, char *argv[])
 
         int ovs_txn_status = ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop);
 
-        /* Check status of txn that only increments next_cfg. */
+        /* Start a txn that only increments next_cfg, if ovn-controller staged
+         * configuration that ovs-vswitchd still has to apply. */
         if (increment_next_cfg && cfg && !ovs_idl_txn_inc_next_cfg) {
             ovs_idl_txn_inc_next_cfg = ovsdb_idl_txn_create(ovs_idl_loop.idl);
             ovsdb_idl_txn_increment(ovs_idl_txn_inc_next_cfg, &cfg->header_,
                                     &ovsrec_open_vswitch_col_next_cfg, true);
-            inc_txn_status = ovsdb_idl_txn_commit(ovs_idl_txn_inc_next_cfg);
-            if (inc_txn_status == TXN_SUCCESS) {
-                next_cfg = ovsdb_idl_txn_get_increment_new_value(ovs_idl_txn_inc_next_cfg);
-                ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
-                ovs_idl_txn_inc_next_cfg = NULL;
-            } else if (inc_txn_status == TXN_INCOMPLETE) {
-                /* Let it be so it can try to commit. */
-            } else {
-                ovsdb_idl_txn_destroy(ovs_idl_txn_inc_next_cfg);
-                ovs_idl_txn_inc_next_cfg = NULL;
-            }
-
+            ovs_idl_txn_inc_next_cfg =
+                ovs_next_cfg_txn_commit(ovs_idl_txn_inc_next_cfg, &next_cfg);
         }
 
         if (!ovs_txn_status) {

@@ -515,13 +515,18 @@ ct_zone_add(struct ct_zone_ctx *ctx, const char *name, uint16_t zone,
     struct ct_zone *ct_zone = shash_find_data(&ctx->current, name);
     if (!ct_zone) {
         ct_zone = xmalloc(sizeof *ct_zone);
+        *ct_zone = (struct ct_zone) {
+            .limit = -1,
+        };
         shash_add(&ctx->current, name, ct_zone);
     }
 
-    *ct_zone = (struct ct_zone) {
-        .zone = zone,
-        .limit = -1,
-    };
+    /* Only the zone id is (re)assigned here.  The limit belongs to 'name',
+     * not to the zone id, and is maintained by ct_zone_limit_update().
+     * Resetting it would make ct_zones_limits_sync() queue a pending entry
+     * on every recompute, causing a Datapath:ct_zones write that changes
+     * nothing. */
+    ct_zone->zone = zone;
 
     if (set_pending) {
         ct_zone_add_pending(&ctx->pending, CT_ZONE_OF_QUEUED,

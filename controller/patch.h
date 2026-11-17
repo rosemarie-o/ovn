@@ -43,7 +43,8 @@ bool patch_run(struct ovsdb_idl_txn *ovs_idl_txn,
                struct ovsdb_idl_index *ovsrec_port_by_name,
                const struct ovsrec_bridge *br_int,
                const struct sbrec_chassis *,
-               const struct hmap *local_datapaths);
+               const struct hmap *local_datapaths,
+               bool *ports_installed);
 void patch_init(void);
 void patch_destroy(void);
 
