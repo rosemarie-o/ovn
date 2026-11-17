@@ -8918,11 +8918,7 @@ main(int argc, char *argv[])
                                bridge_table,
                                is_ha_chassis_member);
 
-                    if (encaps_synced) {
-                        increment_next_cfg = true && increment_next_cfg;
-                    } else {
-                        increment_next_cfg = false;
-                    }
+                    increment_next_cfg |= !encaps_synced;
 
                     ovn_netlink_notifiers_run();
 
@@ -8984,11 +8980,7 @@ main(int argc, char *argv[])
                                             &ct_zones_data->ctx);
                             stopwatch_stop(CT_ZONE_COMMIT_STOPWATCH_NAME,
                                            time_msec());
-                            if (ct_zones_synced) {
-                                increment_next_cfg = true && increment_next_cfg;
-                            } else {
-                                increment_next_cfg = false;
-                            }
+                            increment_next_cfg |= !ct_zones_synced;
                         }
                         if (bfd_chassis_data) {
                             stopwatch_start(
@@ -9002,11 +8994,7 @@ main(int argc, char *argv[])
                             );
                             stopwatch_stop(
                                 BFD_RUN_STOPWATCH_NAME, time_msec());
-                            if (bfd_synced) {
-                                increment_next_cfg = true && increment_next_cfg;
-                            } else {
-                                increment_next_cfg = false;
-                            }
+                            increment_next_cfg |= !bfd_synced;
                         }
                     }
 
@@ -9020,11 +9008,7 @@ main(int argc, char *argv[])
                             ovsrec_port_by_name, br_int, chassis,
                             &runtime_data->local_datapaths);
                         stopwatch_stop(PATCH_RUN_STOPWATCH_NAME, time_msec());
-                        if (patch_ports_synced) {
-                            increment_next_cfg = true && increment_next_cfg;
-                        } else {
-                            increment_next_cfg = false;
-                        }
+                        increment_next_cfg |= !patch_ports_synced;
 
 
                         if (vif_plug_provider_has_providers() && ovs_idl_txn) {
@@ -9145,11 +9129,7 @@ main(int argc, char *argv[])
                                        ovsrec_qos_table_get(ovs_idl_loop.idl),
                                        &runtime_data->qos_map,
                                        ovs_table, bridge_table);
-                        if (update_qos_synced) {
-                            increment_next_cfg = true && increment_next_cfg;
-                        } else {
-                            increment_next_cfg = false;
-                        }
+                            increment_next_cfg |= !update_qos_synced;
                         }
                     }
 
