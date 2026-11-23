@@ -75,29 +75,69 @@ jobs:
       fail-fast: false
       matrix:
         # Valid options are:
-        # target: ["shard-conformance", "control-plane", "external-gateway" ]
+        # target: ["shard-conformance", "no-uplink", "control-plane", "multi-homing", "node-ip-mac-migration",
+        #          "external-gateway", "kv-live-migration", "network-segmentation",
+        #          "network-segmentation-dynamic", "bgp", "bgp-no-overlay", "bgp-no-overlay-dynamic", "bgp-loose-isolation",
+        #          "evpn", "traffic-flow-test-only", "tools", "serial"]
         #         shard-conformance: hybrid-overlay = multicast-enable = emptylb-enable = false
         #         control-plane: hybrid-overlay = multicast-enable = emptylb-enable = true
+        #         targets ending in "-dynamic" run with dynamic UDN allocation enabled
         # gateway-mode: ["local", "shared"]
         # ipfamily: ["ipv4", "ipv6", "dualstack"]
         # disable-snat-multiple-gws: ["noSnatGW", "snatGW"]
         # second-bridge: ["2br", "1br"]
-        # ic: ["ic-single-node-zones", "ic-multi-node-zones"]
+        # cni-mode: ["privileged", "unprivileged"]
+        # num-workers : "<integer value>"
         # forwarding : ["", "disable-forwarding"]
+        # dns-name-resolver : ["", "enable-dns-name-resolver"]
         # network-segmentation : ["", "enable-network-segmentation"]
+        # traffic-flow-tests : "<tests range. i.e. 1-24>"
         include:
-          - {"target": "shard-conformance",    "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "snatGW",   "second-bridge": "1br", "ic": "ic-single-node-zones"}
-          - {"target": "shard-conformance",    "gateway-mode": "shared", "ipfamily": "ipv6",      "disable-snat-multiple-gws": "snatGW",   "second-bridge": "1br", "ic": "ic-single-node-zones"}
-          - {"target": "shard-conformance",    "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "snatGW",   "second-bridge": "1br", "ic": "ic-single-node-zones"}
-          - {"target": "shard-conformance",    "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "ic": "ic-single-node-zones"}
-          - {"target": "control-plane",        "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "2br", "ic": "ic-single-node-zones"}
-          - {"target": "control-plane",        "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "snatGW",   "second-bridge": "1br", "ic": "ic-single-node-zones"}
-          - {"target": "external-gateway",     "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "2br", "ic": "ic-single-node-zones"}
-          - {"target": "external-gateway",     "gateway-mode": "local",  "ipfamily": "ipv6",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "ic": "ic-single-node-zones"}
-          - {"target": "network-segmentation", "gateway-mode": "shared", "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "ic": "ic-single-node-zones", "forwarding": "disable-forwarding"}
-          - {"target": "network-segmentation", "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "ic": "ic-single-node-zones"}
-          - {"target": "network-segmentation", "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "ic": "ic-single-node-zones", "cni-mode": "unprivileged"}
-          - {"target": "network-segmentation", "gateway-mode": "shared", "ipfamily": "ipv6",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "ic": "ic-single-node-zones"}
+          - {"target": "shard-conformance", "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "snatGW",   "second-bridge": "1br", "cni-mode": "privileged"}
+          # Keep dedicated coverage for a local gateway bridge without a system uplink so gateway initialization
+          # cannot silently fall back to the normal bridge-plus-uplink topology.
+          - {"target": "no-uplink", "gateway-mode": "local", "ipfamily": "ipv4", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "shard-conformance", "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default"}
+          - {"target": "shard-conformance", "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default"}
+          - {"target": "shard-conformance", "gateway-mode": "shared", "ipfamily": "ipv6",      "disable-snat-multiple-gws": "noSnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default", "no-overlay": "true"}
+          - {"target": "shard-conformance", "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "managed", "no-overlay": "managed"}
+          - {"target": "shard-conformance", "gateway-mode": "shared", "ipfamily": "ipv6",      "disable-snat-multiple-gws": "snatGW",   "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "shard-conformance", "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "snatGW",   "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "control-plane", "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "snatGW",   "second-bridge": "1br", "cni-mode": "privileged", "dns-name-resolver": "enable-dns-name-resolver"}
+          - {"target": "control-plane", "gateway-mode": "local",  "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged", "dns-name-resolver": "enable-dns-name-resolver", "image_family": "ubuntu"}
+          - {"target": "control-plane", "gateway-mode": "local",  "ipfamily": "ipv6",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "control-plane", "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "2br", "cni-mode": "privileged"}
+          - {"target": "control-plane", "gateway-mode": "shared", "ipfamily": "ipv6",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "2br", "cni-mode": "unprivileged"}
+          - {"target": "multi-homing", "gateway-mode": "shared",  "ipfamily": "dualstack",      "disable-snat-multiple-gws": "SnatGW",   "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "node-ip-mac-migration", "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "SnatGW",   "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "multi-homing", "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "SnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "network-segmentation": "enable-network-segmentation"}
+          - {"target": "external-gateway", "gateway-mode": "shared", "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "2br", "cni-mode": "privileged"}
+          - {"target": "external-gateway", "gateway-mode": "local",  "ipfamily": "ipv4",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "external-gateway", "gateway-mode": "shared", "ipfamily": "ipv6",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "2br", "cni-mode": "privileged"}
+          - {"target": "external-gateway", "gateway-mode": "local",  "ipfamily": "ipv6",      "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "kv-live-migration", "gateway-mode": "shared", "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "num-workers": "3", "network-segmentation": "enable-network-segmentation", "routeadvertisements": "true"}
+          - {"target": "kv-live-migration", "gateway-mode": "local", "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "num-workers": "3", "network-segmentation": "enable-network-segmentation", "routeadvertisements": "true", "evpn": "enable-evpn"}
+          - {"target": "control-plane", "gateway-mode": "shared", "ipfamily": "ipv4", "disable-snat-multiple-gws": "SnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "forwarding": "disable-forwarding"}
+          - {"target": "network-segmentation", "gateway-mode": "shared", "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged", "forwarding": "disable-forwarding"}
+          - {"target": "network-segmentation", "gateway-mode": "local", "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "unprivileged"}
+          - {"target": "network-segmentation-dynamic", "gateway-mode": "shared", "ipfamily": "ipv4", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "unprivileged"}
+          - {"target": "network-segmentation", "gateway-mode": "shared", "ipfamily": "ipv6", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged"}
+          - {"target": "network-segmentation", "gateway-mode": "shared", "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "disable-udn-arp-ndp-flood":"true", "cni-mode": "privileged"}
+          - {"target": "bgp", "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "snatGW", "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default", "network-segmentation": "enable-network-segmentation", "dns-name-resolver": "enable-dns-name-resolver"}
+          - {"target": "bgp", "gateway-mode": "shared",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default", "network-segmentation": "enable-network-segmentation", "dns-name-resolver": "enable-dns-name-resolver"}
+          - {"target": "bgp", "gateway-mode": "local",  "ipfamily": "ipv6", "disable-snat-multiple-gws": "snatGW", "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default", "network-segmentation": "enable-network-segmentation"}
+          # no-overlay mode cannot be enabled alongside other tests: activating it on the default network requires
+          # restarting ovn-k pods (day-2 reconfiguration), which would disrupt any concurrently running test jobs.
+          # Dedicated no-overlay jobs are therefore required to cover feature combinations that may interact with
+          # no-overlay (e.g. BGP route advertisements, network-segmentation) where implementations are not strictly orthogonal.
+          - {"target": "bgp-managed", "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "managed", "no-overlay": "managed"}
+          - {"target": "bgp-no-overlay-dynamic", "gateway-mode": "shared", "ipfamily": "dualstack", "disable-snat-multiple-gws": "SnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default", "network-segmentation": "enable-network-segmentation", "no-overlay": "snat-enabled"}
+          - {"target": "bgp-no-overlay", "gateway-mode": "local",  "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW",   "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default", "network-segmentation": "enable-network-segmentation", "no-overlay": "true"}
+          - {"target": "bgp-loose-isolation", "gateway-mode": "shared", "ipfamily": "dualstack", "disable-snat-multiple-gws": "snatGW", "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default", "network-segmentation": "enable-network-segmentation", "advertised-udn-isolation-mode": "loose"}
+          - {"target": "evpn", "gateway-mode": "local", "ipfamily": "dualstack", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged", "routeadvertisements": "advertise-default", "network-segmentation": "enable-network-segmentation", "evpn": "enable-evpn"}
+          - {"target": "traffic-flow-test-only", "gateway-mode": "shared", "ipfamily": "ipv4", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged", "traffic-flow-tests": "1-24", "network-segmentation": "enable-network-segmentation"}
+          - {"target": "tools", "gateway-mode": "local", "ipfamily": "dualstack", "disable-snat-multiple-gws": "SnatGW", "second-bridge": "1br", "cni-mode": "privileged", "network-segmentation": "enable-network-segmentation"}
+          - {"target": "serial", "gateway-mode": "shared", "ipfamily": "ipv4", "disable-snat-multiple-gws": "snatGW", "second-bridge": "1br", "cni-mode": "privileged"}
 
     needs: [build]
     env:
