@@ -70,6 +70,7 @@ jobs:
   e2e:
     name: e2e
     runs-on: ubuntu-24.04
+    # 30 mins for kind, 180 mins for control-plane tests, 10 minutes for all other steps
     timeout-minutes: 220
     strategy:
       fail-fast: false
@@ -138,66 +139,105 @@ jobs:
           - {"target": "traffic-flow-test-only", "gateway-mode": "shared", "ipfamily": "ipv4", "disable-snat-multiple-gws": "noSnatGW", "second-bridge": "1br", "cni-mode": "privileged", "traffic-flow-tests": "1-24", "network-segmentation": "enable-network-segmentation"}
           - {"target": "tools", "gateway-mode": "local", "ipfamily": "dualstack", "disable-snat-multiple-gws": "SnatGW", "second-bridge": "1br", "cni-mode": "privileged", "network-segmentation": "enable-network-segmentation"}
           - {"target": "serial", "gateway-mode": "shared", "ipfamily": "ipv4", "disable-snat-multiple-gws": "snatGW", "second-bridge": "1br", "cni-mode": "privileged"}
-
-    needs: [build]
+    needs: [ changes, build-pr, build-pr-ubuntu ]
+    if: ${{ !cancelled() && needs.changes.outputs.run_ci == 'true' }}
     env:
-      JOB_NAME: "${{ matrix.target }}-${{ matrix.ha }}-${{ matrix.gateway-mode }}-${{ matrix.ipfamily }}-${{ matrix.disable-snat-multiple-gws }}-${{ matrix.second-bridge }}"
-      OVN_HYBRID_OVERLAY_ENABLE: "${{ matrix.target == 'control-plane' }}"
-      KIND_INSTALL_METALLB: "${{ matrix.target == 'control-plane' || matrix.target == 'network-segmentation' }}"
-      OVN_MULTICAST_ENABLE:  "${{ matrix.target == 'control-plane' || matrix.target == 'network-segmentation'}}"
-      OVN_EMPTY_LB_EVENTS: "${{ matrix.target == 'control-plane' }}"
-      OVN_ENABLE_INTERCONNECT: "${{ matrix.ic == 'ic-single-node-zones' ||  matrix.ic == 'ic-multi-node-zones'}}"
-      ENABLE_NETWORK_SEGMENTATION: "${{ matrix.target == 'network-segmentation' || matrix.network-segmentation == 'enable-network-segmentation' }}"
-      OVN_HA: "${{ matrix.ha == 'HA' }}"
+      JOB_NAME: "${{ matrix.target }}-${{ matrix.gateway-mode }}-${{ matrix.ipfamily }}-${{ matrix.disable-snat-multiple-gws }}-${{ matrix.second-bridge }}-${{ matrix.cni-mode }}-${{ matrix.image_family || 'fedora' }}"
+      OVN_HYBRID_OVERLAY_ENABLE: ${{ matrix.target == 'control-plane' && (matrix.ipfamily == 'ipv4' || matrix.ipfamily == 'dualstack' ) }}
+      OVN_MULTICAST_ENABLE:  "${{ matrix.target == 'control-plane' || startsWith(matrix.target, 'network-segmentation') || startsWith(matrix.target, 'bgp') }}"
+      OVN_EMPTY_LB_EVENTS: "${{ matrix.target == 'control-plane' || startsWith(matrix.target, 'bgp') }}"
+      OVN_IMAGE_FAMILY: "${{ matrix.image_family || 'fedora' }}"
+      OVN_IMAGE: "${{ matrix.image_family == 'ubuntu' && 'ovn-daemonset-ubuntu:pr' || 'ovn-daemonset-fedora:pr' }}"
+      CI_E2E_IMAGE_ARTIFACT: "${{ matrix.image_family == 'ubuntu' && 'test-image-pr-ubuntu' || 'test-image-pr' }}"
+      CI_E2E_IMAGE_TAR: "${{ matrix.image_family == 'ubuntu' && 'image-pr-ubuntu.tar' || 'image-pr.tar' }}"
       OVN_DISABLE_SNAT_MULTIPLE_GWS: "${{ matrix.disable-snat-multiple-gws == 'noSnatGW' }}"
+      KIND_INSTALL_METALLB: "${{ matrix.target == 'control-plane' || startsWith(matrix.target, 'network-segmentation') }}"
       OVN_GATEWAY_MODE: "${{ matrix.gateway-mode }}"
+      OVN_DUMMY_GATEWAY_BRIDGE: "${{ matrix.target == 'no-uplink' }}"
       OVN_SECOND_BRIDGE: "${{ matrix.second-bridge == '2br' }}"
-      ENABLE_MULTI_NET: "${{ matrix.target == 'network-segmentation' }}"
+      ENABLE_MULTI_NET: "${{ matrix.target == 'multi-homing' || matrix.target == 'kv-live-migration' || startsWith(matrix.target, 'network-segmentation') || matrix.target == 'tools' || matrix.target == 'traffic-flow-test-only' || matrix.routeadvertisements != '' }}"
+      ENABLE_NETWORK_SEGMENTATION: "${{ startsWith(matrix.target, 'network-segmentation') || matrix.network-segmentation == 'enable-network-segmentation' }}"
+      DISABLE_UDN_ARP_NDP_FLOOD: "${{ matrix.disable-udn-arp-ndp-flood }}"
+      PLATFORM_IPV4_SUPPORT: "${{ matrix.ipfamily == 'ipv4' || matrix.ipfamily == 'dualstack' }}"
+      PLATFORM_IPV6_SUPPORT: "${{ matrix.ipfamily == 'ipv6' || matrix.ipfamily == 'dualstack' }}"
+      KIND_LOCAL_REGISTRY: "${{ matrix.local-kind-registry == 'true' }}"
+      KIND_INSTALL_KUBEVIRT: "${{ matrix.target == 'kv-live-migration' }}"
+      # the DHCP IPAM e2e needs the dhcp CNI plugin binary on every node for
+      # the regular-pod delegation path (contrib/kind-common.sh install_plugins)
+      KIND_INSTALL_PLUGINS: "${{ matrix.target == 'kv-live-migration' }}"
+      KIND_NUM_WORKER: "${{ matrix.num-workers }}"
       OVN_DISABLE_FORWARDING: "${{ matrix.forwarding == 'disable-forwarding' }}"
-      PLATFORM_IPV4_SUPPORT: "${{ matrix.ipfamily == 'IPv4' || matrix.ipfamily == 'dualstack' }}"
-      PLATFORM_IPV6_SUPPORT: "${{ matrix.ipfamily == 'IPv6' || matrix.ipfamily == 'dualstack' }}"
-      ENABLE_PRE_CONF_UDN_ADDR: "${{ matrix.ic == 'ic-single-node-zones' && (matrix.target == 'network-segmentation' || matrix.network-segmentation == 'enable-network-segmentation') }}"
-      ENABLE_NETWORK_CONNECT: "${{ matrix.target == 'network-segmentation' }}"
+      OVN_ENABLE_DNSNAMERESOLVER: "${{ matrix.dns-name-resolver == 'enable-dns-name-resolver' }}"
+      OVN_NETWORK_QOS_ENABLE: "${{ matrix.target == 'control-plane' || matrix.target == 'kv-live-migration' }}"
+      TRAFFIC_FLOW_TESTS: "${{ matrix.traffic-flow-tests }}"
+      ENABLE_ROUTE_ADVERTISEMENTS: "${{ matrix.routeadvertisements != '' }}"
+      ENABLE_EVPN: "${{ matrix.target == 'evpn' || matrix.evpn == 'enable-evpn' }}"
+      ADVERTISE_DEFAULT_NETWORK:  "${{ matrix.routeadvertisements == 'advertise-default' }}"
+      ENABLE_NETWORK_CONNECT: "${{ startsWith(matrix.target, 'network-segmentation') }}"
+      ENABLE_UPLINK: "${{ startsWith(matrix.target, 'network-segmentation') || matrix.network-segmentation == 'enable-network-segmentation' }}"
+      ENABLE_PRE_CONF_UDN_ADDR: "${{ startsWith(matrix.target, 'network-segmentation') || matrix.network-segmentation == 'enable-network-segmentation' }}"
+      ADVERTISED_UDN_ISOLATION_MODE: "${{ matrix.advertised-udn-isolation-mode }}"
+      # Managed BGP tests change the shared template and must run serially.
+      # The ARP/NDP flood lane carries Serial specs that PARALLEL=true would skip,
+      # and they are the only CI coverage of the MAC binding mirroring controller.
+      # Compared against 'true' rather than negated: any non-empty string, "false"
+      # included, is truthy in a GitHub expression.
+      PARALLEL: "${{ matrix.target != 'serial' && matrix.target != 'bgp-managed' && matrix.disable-udn-arp-ndp-flood != 'true' }}"
       OVN_UNPRIVILEGED_MODE: "${{ matrix.cni-mode == 'unprivileged' }}"
       MULTI_POD_SUBNET: true
+      DYNAMIC_UDN_ALLOCATION: "${{ endsWith(matrix.target, '-dynamic') }}"
+      ENABLE_NO_OVERLAY: "${{ matrix.no-overlay != '' }}"
+      ENABLE_NO_OVERLAY_OUTBOUND_SNAT: "${{ matrix.no-overlay == 'snat-enabled' || matrix.no-overlay == 'managed' }}"
+      ENABLE_NO_OVERLAY_MANAGED_ROUTING: "${{ matrix.no-overlay == 'managed' }}"
     steps:
-
-    - name: Check out ovn
-      uses: actions/checkout@v6
-
-    - name: Fix /etc/hosts file
+    - name: Verify selected image build
+      env:
+        FEDORA_BUILD_RESULT: ${{ needs.build-pr.result }}
+        UBUNTU_BUILD_RESULT: ${{ needs.build-pr-ubuntu.result }}
       run: |
-        . .ci/linux-util.sh
-        fix_etc_hosts
+        if [ "${OVN_IMAGE_FAMILY}" = "ubuntu" ]; then
+          test "${UBUNTU_BUILD_RESULT}" = "success"
+        else
+          test "${FEDORA_BUILD_RESULT}" = "success"
+        fi
+
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v6
 
     - name: Install VRF kernel module
       run: |
         set -x
-        sudo apt update
-        sudo apt-get install linux-modules-$(uname -r) -y
-        sudo modprobe vrf
+        # Newer Ubuntu kernels ship vrf in linux-modules and have no
+        # linux-modules-extra package, so only install it when needed.
+        if ! sudo modprobe vrf; then
+          sudo apt update
+          sudo apt-get install linux-modules-extra-$(uname -r) -y
+          sudo modprobe vrf
+        fi
 
     - name: Free up disk space
-      run: |
-        . .ci/linux-util.sh
-        free_up_disk_space_ubuntu
+      uses: ./.github/actions/free-disk-space
 
-    - name: Check out ovn-kubernetes
-      uses: actions/checkout@v6
-      with:
-          path: src/github.com/ovn-kubernetes/ovn-kubernetes
-          repository: ovn-kubernetes/ovn-kubernetes
-          ref: ${{ env.OVNKUBE_COMMIT }}
-
-    - name: Prepare
+    - name: Setup /mnt/runner directory
       run: |
-        .ci/ovn-kubernetes/prepare.sh src/github.com/ovn-kubernetes/ovn-kubernetes $GITHUB_ENV
+        sudo mkdir -pv /mnt/runner
+        sudo chown runner:runner /mnt/runner
+
+    - name: Setup /mnt/docker-data as docker storage
+      run: |
+        sudo mkdir -pv /mnt/docker-data
+        sudo systemctl stop docker.socket docker
+        [ -s "/etc/docker/daemon.json" ] && {
+          cat "/etc/docker/daemon.json" | jq '. + {"data-root": "/mnt/docker-data"}' | sudo tee /etc/docker/daemon.$$
+        } || {
+          echo '{"data-root": "/mnt/docker-data"}' | sudo tee /etc/docker/daemon.$$
+        }
+        sudo mv -f /etc/docker/daemon.$$ /etc/docker/daemon.json
+        sudo systemctl start docker docker.socket
+        docker system info
 
     - name: Set up Go
-      uses: actions/setup-go@v6
-      with:
-        go-version: ${{ env.GO_VERSION }}
-        cache-dependency-path: "**/*.sum"
+      uses: ./.github/actions/setup-go
       id: go
 
     - name: Set up environment
@@ -210,6 +250,40 @@ jobs:
           echo OVN_TEST_EX_GW_NETWORK=xgw >> $GITHUB_ENV
           echo OVN_ENABLE_EX_GW_NETWORK_BRIDGE=true >> $GITHUB_ENV
         fi
+        if [ "$ADVERTISE_DEFAULT_NETWORK" == "true" ]; then
+          echo "ADVERTISE_DEFAULT_NETWORK=true" >> $GITHUB_ENV
+
+          # Use proper variable declaration with default values
+          if [ $MULTI_POD_SUBNET == "true" ]; then
+            NET_CIDR_IPV4=${NET_CIDR_IPV4:-10.243.0.0/23,10.244.0.0/16}
+            NET_CIDR_IPV6=${NET_CIDR_IPV6:-fd00:10:243::/63,fd00:10:244::/48}
+          else
+            NET_CIDR_IPV4=${NET_CIDR_IPV4:-10.244.0.0/16}
+            NET_CIDR_IPV6=${NET_CIDR_IPV6:-fd00:10:244::/48}
+          fi
+          sudo ip a
+          sudo ip r
+
+          # Add masquerade rules for both IPv4 and IPv6 networks
+          echo "Adding masquerade rule for $NET_CIDR_IPV4"
+          IFS=',' read -r -a ELEMENTS <<< "$NET_CIDR_IPV4"
+          for element in "${ELEMENTS[@]}"; do
+            sudo iptables -t nat -A POSTROUTING -s $element -o eth0 -j MASQUERADE
+          done
+
+          echo "Adding masquerade rule for $NET_CIDR_IPV6"
+          IFS=',' read -r -a ELEMENTS <<< "$NET_CIDR_IPV6"
+          for element in "${ELEMENTS[@]}"; do
+            sudo ip6tables -t nat -A POSTROUTING -s $element -o eth0 -j MASQUERADE
+          done
+
+          # Verify the rules were added
+          echo "IPv4 POSTROUTING rules:"
+          sudo iptables -t nat -L POSTROUTING -v
+
+          echo "IPv6 POSTROUTING rules:"
+          sudo ip6tables -t nat -L POSTROUTING -v
+        fi
 
     - name: Disable ufw
       # For IPv6 and Dualstack, ufw (Uncomplicated Firewall) should be disabled.
@@ -217,53 +291,111 @@ jobs:
       run: |
         sudo ufw disable
 
-    - uses: actions/download-artifact@v8
+    - name: Download selected PR image
+      uses: actions/download-artifact@v8
       with:
-        name: test-image
+        name: ${{ env.CI_E2E_IMAGE_ARTIFACT }}
+
+    - name: Disable containerd image store
+      # Workaround for https://github.com/kubernetes-sigs/kind/issues/3795
+      run: |
+        sudo mkdir -p /etc/docker
+        docker --version || true
+        containerd --version || true
+        [ -s "/etc/docker/daemon.json" ] && {
+          cat "/etc/docker/daemon.json" | jq '. + {"features":{"containerd-snapshotter": false}}' | sudo tee /etc/docker/daemon.$$
+        } || {
+          echo '{"features":{"containerd-snapshotter": false}}' | sudo tee /etc/docker/daemon.$$
+        }
+        sudo mv -f /etc/docker/daemon.$$ /etc/docker/daemon.json
+        sudo systemctl restart docker
 
     - name: Load docker image
       run: |
-        docker load --input image.tar && rm -rf image.tar
+        docker load --input ${CI_E2E_IMAGE_TAR} && rm -rf ${CI_E2E_IMAGE_TAR}
+        docker images || true
 
     - name: kind setup
+      timeout-minutes: 30
       run: |
-        export OVN_IMAGE="ovn-daemonset-f:dev"
         make -C test install-kind
-      working-directory: src/github.com/ovn-kubernetes/ovn-kubernetes
+
+    - name: traffic-flow-tests setup
+      timeout-minutes: 5
+      if: env.TRAFFIC_FLOW_TESTS != ''
+      run: make -C test traffic-flow-tests WHAT="setup"
 
     - name: Run Tests
       # e2e tests take ~60 minutes normally, 120 should be more than enough
       # set 3 hours for control-plane tests as these might take a while
-      # give 10m extra to give ginkgo chance to timeout before github so that
-      # we get its output.
-      timeout-minutes: ${{ matrix.target == 'control-plane' && 190 || 130 }}
+      # give 10m extra to give ginkgo chance to timeout before github so that we
+      # get its output
+      timeout-minutes: ${{ startsWith(matrix.target, 'bgp') && 190 || matrix.target == 'evpn' && 190 || matrix.target == 'control-plane' && 190 || matrix.target == 'external-gateway' && 190 || startsWith(matrix.target, 'network-segmentation') && 190 || 130 }}
       run: |
-        if [ "${{ matrix.target }}" == "external-gateway" ]; then
-            make -C test control-plane WHAT="External Gateway"
-        elif [ "${{ matrix.target }}" == "network-segmentation" ]; then
+        if [ "${{ matrix.target }}" == "multi-homing" ]; then
+          make -C test control-plane WHAT="Multi Homing"
+        elif [ "${{ matrix.target }}" == "no-uplink" ]; then
+          make -C test shard-network
+        elif [ "${{ matrix.target }}" == "node-ip-mac-migration" ]; then
+          make -C test control-plane WHAT="Node IP and MAC address migration"
+        elif [ "${{ matrix.target }}" == "external-gateway" ]; then
+          make -C test control-plane WHAT="External Gateway"
+        elif [ "${{ matrix.target }}" == "kv-live-migration" ]; then
+          # the DHCP IPAM suite (dhcp_ipam.go) rides this lane: it is the one
+          # provisioned with the dhcp CNI plugin (KIND_INSTALL_PLUGINS),
+          # kubevirt and NetworkQoS
+          make -C test control-plane WHAT="Kubevirt Virtual Machines|Localnet DHCP IPAM"
+        elif [[ "${{ matrix.target }}" == network-segmentation* ]]; then
           make -C test control-plane WHAT="Network Segmentation"
+          make -C test control-plane WHAT="ClusterNetworkConnect"
+        elif [ "${{ matrix.target }}" == "evpn" ]; then
+          make -C test control-plane WHAT="EVPN"
+        elif [ "${{ matrix.target }}" == "bgp" ] || [ "${{ matrix.target }}" == "bgp-no-overlay" ] || [ "${{ matrix.target }}" == "bgp-no-overlay-dynamic" ] || [ "${{ matrix.target }}" == "bgp-loose-isolation" ]; then
+          make -C test control-plane
+        elif [ "${{ matrix.target }}" == "serial" ] || [ "${{ matrix.target }}" == "bgp-managed" ]; then
+          # Run the Serial suite with the environment's compatibility filters.
+          make -C test control-plane WHAT=Serial
+        elif [ "${{ matrix.target }}" == "tools" ]; then
+          make -C go-controller build
+          make -C test tools
+        elif [ "${{ matrix.target }}" == "traffic-flow-test-only" ]; then
+          # Traffic Flow Tests can be ran as part of a target, as an additional
+          # set of test, set via TRAFFIC_FLOW_TESTS. See below.
+          :
         else
-            make -C test ${{ matrix.target }}
+          make -C test "${{ matrix.target }}"
+          if [ "${{ matrix.ipfamily }}" != "ipv6" ]; then
+            make -C test conformance
+          fi
         fi
-      working-directory: src/github.com/ovn-kubernetes/ovn-kubernetes
 
-    - name: Upload Junit Reports
-      if: always()
-      uses: actions/upload-artifact@v7
-      with:
-        name: kind-junit-${{ env.JOB_NAME }}-${{ github.run_id }}
-        path: 'src/github.com/ovn-kubernetes/ovn-kubernetes/test/_artifacts/*.xml'
+        # If target also specified traffic flow tests to run, do so now
+        if [ -n "${TRAFFIC_FLOW_TESTS}" ]; then
+          make -C test traffic-flow-tests WHAT="run"
+        fi
 
-    - name: Export logs
+    - name: Export kind logs
       if: always()
       run: |
-        mkdir -p /tmp/kind/logs
-        kind export logs --name ${KIND_CLUSTER_NAME} --verbosity 4 /tmp/kind/logs
-      working-directory: src/github.com/ovn-kubernetes/ovn-kubernetes
+        ./contrib/export-kind-logs.sh
+        if [ -n "${TRAFFIC_FLOW_TESTS}" ]; then
+            mv -v /tmp/{,kind/logs/}traffic_flow_test_result.json ||:
+        fi
 
-    - name: Upload logs
+    - name: Upload kind logs
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
+        name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}-${{ strategy.job-index }}
         path: /tmp/kind/logs
+
+    - name: Upload coredumps for post-processing
+      if: failure()
+      continue-on-error: true
+      timeout-minutes: 5
+      uses: actions/upload-artifact@v7
+      with:
+        name: coredumps-${{ env.JOB_NAME }}-${{ github.run_id }}-${{ strategy.job-index }}
+        path: /tmp/kind/logs/coredumps
+        if-no-files-found: ignore
+        retention-days: 10
